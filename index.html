@@ -273,6 +273,14 @@
 
   .hidden { display: none !important; }
 
+  .app-footer {
+    text-align: center;
+    color: var(--muted);
+    font-size: 0.8rem;
+    margin: 1.5rem 0 0.5rem;
+    opacity: 0.75;
+  }
+
   .install-banner, .ios-install-hint {
     background: linear-gradient(135deg, #2d8659, #1f6342);
     color: white;
@@ -460,6 +468,10 @@
       <li>Klassieke beeldverwerking met OpenCV.js — geen AI, geen serverupload.</li>
     </ul>
   </details>
+
+  <footer class="app-footer">
+    🐸 Dikkopjes-teller <span id="appVersion"></span>
+  </footer>
 </div>
 
 <!-- OpenCV.js: ~9 MB, eenmalig bij eerste bezoek (daarna gecached) -->
@@ -470,6 +482,7 @@
 'use strict';
 
 const APP_VERSION = '0.4.0-tuned';  // bump on releases
+document.getElementById('appVersion').textContent = 'v' + APP_VERSION;
 
 const DARK_THRESHOLD = 75;
 const BIN_BRIGHT_THRESHOLD = 95;
