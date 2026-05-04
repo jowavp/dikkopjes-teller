@@ -378,9 +378,9 @@
     <div class="controls hidden" id="controls">
       <div class="control-group">
         <label for="saFactor">
-          Calibratie: <span id="saFactorValue">0.95</span>
+          Calibratie: <span id="saFactorValue">0.80</span>
         </label>
-        <input type="range" id="saFactor" min="0.80" max="1.10" step="0.01" value="0.95">
+        <input type="range" id="saFactor" min="0.60" max="1.20" step="0.01" value="0.80">
         <div class="help">Lager = meer dikkopjes geteld (handig bij dichte kluiten)</div>
       </div>
       <button class="primary" id="processBtn">Tel dikkopjes</button>
@@ -469,13 +469,13 @@
 <script>
 'use strict';
 
-const APP_VERSION = '0.3.0-stats';  // bump on releases
+const APP_VERSION = '0.4.0-tuned';  // bump on releases
 
-const DARK_THRESHOLD = 80;
+const DARK_THRESHOLD = 75;
 const BIN_BRIGHT_THRESHOLD = 95;
 const DENSITY_BLUR = 201;
 const DENSITY_THRESHOLD = 6;
-const MIN_BLOB_AREA = 30;
+const MIN_BLOB_AREA = 80;
 const MIN_SINGLE_AREA = 150.0;
 const CLUMP_RATIO_THRESHOLD = 1.6;
 const LARGE_CLUMP_RATIO = 6.0;
@@ -793,29 +793,33 @@ function findBinMask(blurred) {
   const dense = new cv.Mat();
   cv.threshold(density, dense, DENSITY_THRESHOLD, 255, cv.THRESH_BINARY);
 
-  // 3. Largest connected component
+  // 3. Take ALL dense components >= 20% of the largest. Critical for bins
+  // where tadpoles cluster in disconnected areas (e.g. left vs right side):
+  // taking only the largest component would crop out half the bin.
   const labels = new cv.Mat();
   const stats = new cv.Mat();
   const centroids = new cv.Mat();
   const num = cv.connectedComponentsWithStats(dense, labels, stats, centroids, 8);
-  let largest = -1, largestArea = 0;
+  let largestArea = 0;
   for (let i = 1; i < num; i++) {
     const a = stats.intAt(i, cv.CC_STAT_AREA);
-    if (a > largestArea) { largestArea = a; largest = i; }
+    if (a > largestArea) largestArea = a;
+  }
+  const keepThreshold = Math.max(1, Math.floor(largestArea * 0.20));
+  const keep = new Uint8Array(num);
+  for (let i = 1; i < num; i++) {
+    if (stats.intAt(i, cv.CC_STAT_AREA) >= keepThreshold) keep[i] = 1;
   }
 
   let mask;
-  if (largest === -1) {
+  if (largestArea === 0) {
     mask = new cv.Mat(blurred.rows, blurred.cols, cv.CV_8U, new cv.Scalar(255));
   } else {
-    // Build region mask: pixels where labels == largest.
-    // OpenCV.js's cv.compare with a scalar Mat is fiddly, so we build the mask
-    // directly by reading the labels data and writing to a uint8 Mat.
     const region = new cv.Mat(labels.rows, labels.cols, cv.CV_8U, new cv.Scalar(0));
     const labelsData = labels.data32S;  // Int32Array view
     const regionData = region.data;     // Uint8Array view
     for (let i = 0; i < labelsData.length; i++) {
-      if (labelsData[i] === largest) regionData[i] = 255;
+      if (keep[labelsData[i]]) regionData[i] = 255;
     }
     // Convex hull from contours
     const contours = new cv.MatVector();
@@ -879,26 +883,38 @@ function findBinMask(blurred) {
 }
 
 function estimateSingleArea(areas, saFactor) {
-  // Find the 90th percentile
-  const sorted = [...areas].sort((a, b) => a - b);
-  const p90 = sorted[Math.floor(sorted.length * 0.9)] || 200;
-  const upper = Math.max(p90, 200);
+  // Histogram peak in LOG space — robust against tiny noise blobs that pulled
+  // the linear histogram peak down to the floor bucket. The mode in log-space
+  // tracks the typical tadpole size even when there are many small artefacts.
+  if (areas.length === 0) return MIN_SINGLE_AREA * saFactor;
+  if (areas.length < 3) {
+    const sorted = [...areas].sort((a, b) => a - b);
+    return Math.max(MIN_SINGLE_AREA, sorted[Math.floor(sorted.length / 2)]) * saFactor;
+  }
 
-  // Histogram with 40 bins from 0 to upper
-  const bins = 40;
-  const binWidth = upper / bins;
+  const logAreas = areas.map(a => Math.log(a));
+  let lo = logAreas[0], hi = logAreas[0];
+  for (const v of logAreas) {
+    if (v < lo) lo = v;
+    if (v > hi) hi = v;
+  }
+  const bins = 30;
+  const span = hi - lo;
+  if (span <= 0) return Math.max(MIN_SINGLE_AREA, Math.exp(lo)) * saFactor;
+  const binWidth = span / bins;
   const hist = new Array(bins).fill(0);
-  for (const a of areas) {
-    if (a >= 0 && a < upper) {
-      const idx = Math.min(bins - 1, Math.floor(a / binWidth));
-      hist[idx]++;
-    }
+  for (const v of logAreas) {
+    let idx = Math.floor((v - lo) / binWidth);
+    if (idx >= bins) idx = bins - 1;
+    if (idx < 0) idx = 0;
+    hist[idx]++;
   }
   let peakIdx = 0, peakVal = hist[0];
   for (let i = 1; i < bins; i++) {
     if (hist[i] > peakVal) { peakVal = hist[i]; peakIdx = i; }
   }
-  const peakArea = (peakIdx + 0.5) * binWidth;
+  const logPeak = lo + (peakIdx + 0.5) * binWidth;
+  const peakArea = Math.exp(logPeak);
   return Math.max(MIN_SINGLE_AREA, peakArea) * saFactor;
 }
 
@@ -1099,14 +1115,14 @@ async function submitFeedback(sharePhoto) {
 /**
  * Vindt de sa_factor die het dichtst bij userTarget komt.
  * Gebruikt de gecachte blobs van lastResult — geen OpenCV calls,
- * dus zeer snel (< 1 ms voor 31 iteraties).
+ * dus zeer snel (< 1 ms voor 61 iteraties).
  */
 function findBestSaFactor(_img, userTarget) {
   if (!lastResult || !lastResult.blobs) return null;
   const blobs = lastResult.blobs;
   let best = null;
-  for (let i = 0; i <= 30; i++) {
-    const f = 0.80 + i * 0.01;
+  for (let i = 0; i <= 60; i++) {
+    const f = 0.60 + i * 0.01;
     const { total } = blobsToDetections(blobs, f);
     const diff = Math.abs(total - userTarget);
     if (best === null || diff < best.diff) {

@@ -1,7 +1,7 @@
 // Dikkopjes-teller service worker
 // Cacht de app shell + OpenCV.js zodat alles offline werkt na het eerste bezoek.
 
-const CACHE_VERSION = 'dikkopjes-v3';
+const CACHE_VERSION = 'dikkopjes-v4';
 
 // Wat lokaal aanwezig is en bij installatie meteen gecached wordt
 const APP_SHELL = [
