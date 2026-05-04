@@ -1,0 +1,547 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>📊 Dikkopjes-teller stats</title>
+<style>
+  :root {
+    --bg: #f5f7f9;
+    --card: #ffffff;
+    --text: #1a2a3a;
+    --muted: #6b7c8e;
+    --accent: #2d8659;
+    --accent-dark: #1f6342;
+    --border: #e1e8ed;
+    --error: #c0392b;
+    --warn: #d68910;
+    --good: #2d8659;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    padding: 1rem;
+    line-height: 1.5;
+  }
+  .container { max-width: 1200px; margin: 0 auto; }
+  header { margin: 1rem 0 1.5rem; display: flex; gap: 1rem; align-items: baseline; flex-wrap: wrap; }
+  header h1 { font-size: 1.6rem; }
+  header a { color: var(--muted); text-decoration: none; font-size: 0.95rem; }
+  header a:hover { color: var(--accent); }
+
+  .card {
+    background: var(--card);
+    border-radius: 12px;
+    padding: 1.5rem;
+    margin-bottom: 1rem;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+    border: 1px solid var(--border);
+  }
+  .card h2 { font-size: 1.2rem; margin-bottom: 1rem; color: var(--text); }
+
+  .summary {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 1rem;
+  }
+  .stat {
+    text-align: center;
+    padding: 1rem;
+    background: #fafbfc;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+  }
+  .stat .value {
+    font-size: 1.8rem;
+    font-weight: 700;
+    color: var(--accent);
+    line-height: 1.2;
+  }
+  .stat .label {
+    font-size: 0.85rem;
+    color: var(--muted);
+    margin-top: 0.3rem;
+  }
+  .stat.warn .value { color: var(--warn); }
+  .stat.error .value { color: var(--error); }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.9rem;
+  }
+  th, td {
+    text-align: left;
+    padding: 0.6rem 0.5rem;
+    border-bottom: 1px solid var(--border);
+    vertical-align: middle;
+  }
+  th {
+    font-weight: 600;
+    color: var(--muted);
+    background: #fafbfc;
+    position: sticky; top: 0;
+    cursor: pointer;
+    user-select: none;
+  }
+  th:hover { background: #f0f4f7; }
+  th.sorted-asc::after { content: ' ↑'; color: var(--accent); }
+  th.sorted-desc::after { content: ' ↓'; color: var(--accent); }
+  tbody tr:hover { background: #fafbfc; }
+
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .err-good { color: var(--good); font-weight: 600; }
+  .err-warn { color: var(--warn); font-weight: 600; }
+  .err-bad  { color: var(--error); font-weight: 600; }
+
+  .thumb {
+    width: 60px;
+    height: 60px;
+    object-fit: cover;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    cursor: pointer;
+  }
+  .thumb-empty {
+    width: 60px;
+    height: 60px;
+    background: #f0f4f7;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--muted);
+    font-size: 0.7rem;
+  }
+
+  .table-wrap { overflow-x: auto; max-height: 70vh; }
+
+  .chart-container { width: 100%; max-width: 100%; }
+  canvas.chart { width: 100% !important; height: auto !important; max-height: 300px; }
+
+  .loading, .error-msg {
+    text-align: center;
+    padding: 2rem;
+    color: var(--muted);
+  }
+  .error-msg { color: var(--error); }
+
+  /* Lightbox voor grote foto */
+  .lightbox {
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.85);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    padding: 1rem;
+  }
+  .lightbox.show { display: flex; }
+  .lightbox img { max-width: 100%; max-height: 95vh; border-radius: 4px; }
+  .lightbox .close-hint {
+    position: absolute; top: 1rem; right: 1rem;
+    color: white; font-size: 1.5rem; opacity: 0.7; cursor: pointer;
+  }
+
+  .filter-row {
+    display: flex; gap: 1rem; align-items: center; flex-wrap: wrap;
+    margin-bottom: 1rem; font-size: 0.9rem;
+  }
+  .filter-row label { color: var(--muted); }
+  .filter-row select, .filter-row input {
+    padding: 0.4rem 0.6rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: white;
+    font-size: 0.9rem;
+  }
+
+  .recommendation {
+    background: #fff8e1;
+    border-left: 4px solid #f5c518;
+    padding: 1rem;
+    border-radius: 6px;
+    margin-top: 1rem;
+    font-size: 0.95rem;
+  }
+  .recommendation strong { color: #5d4500; }
+
+  .spinner {
+    display: inline-block;
+    width: 18px; height: 18px;
+    border: 3px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    vertical-align: middle;
+    margin-right: 0.5rem;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <h1>📊 Dikkopjes-teller stats</h1>
+    <a href="./">← terug naar app</a>
+    <span style="margin-left: auto; color: var(--muted); font-size: 0.85rem;">
+      <span id="lastUpdate">laden…</span>
+    </span>
+  </header>
+
+  <div class="card" id="summaryCard">
+    <h2>Samenvatting</h2>
+    <div class="loading"><span class="spinner"></span>Data ophalen…</div>
+  </div>
+
+  <div class="card hidden" id="chartCard">
+    <h2>Verdeling van fouten (in %)</h2>
+    <div class="chart-container">
+      <canvas id="errorChart" class="chart" width="800" height="240"></canvas>
+    </div>
+  </div>
+
+  <div class="card hidden" id="tableCard">
+    <h2>Alle feedbacks</h2>
+    <div class="filter-row">
+      <label>Filter:
+        <select id="filterMode">
+          <option value="all">alle</option>
+          <option value="errors">enkel met fout (≥1%)</option>
+          <option value="confirmed">enkel bevestigd correct</option>
+          <option value="with-photo">enkel met foto</option>
+        </select>
+      </label>
+      <span style="color: var(--muted);" id="rowCount"></span>
+    </div>
+    <div class="table-wrap">
+      <table id="dataTable">
+        <thead>
+          <tr>
+            <th data-key="created_at">Datum</th>
+            <th>Foto</th>
+            <th data-key="app_count" class="num">App</th>
+            <th data-key="user_count" class="num">Echt</th>
+            <th data-key="error_pct" class="num">Fout %</th>
+            <th data-key="sa_factor" class="num">Factor</th>
+            <th data-key="best_sa_factor" class="num">Beste factor</th>
+            <th data-key="num_blobs" class="num">Blobs</th>
+            <th data-key="num_singles" class="num">Singles</th>
+            <th data-key="num_small_clumps" class="num">Sm.kluit</th>
+            <th data-key="num_medium_clumps" class="num">Md.kluit</th>
+            <th data-key="num_large_clumps" class="num">Gr.kluit</th>
+            <th data-key="largest_blob_area" class="num">Grootste blob</th>
+            <th>Versie</th>
+          </tr>
+        </thead>
+        <tbody id="dataBody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<div class="lightbox" id="lightbox">
+  <span class="close-hint">×</span>
+  <img id="lightboxImg" src="" alt="">
+</div>
+
+<script>
+'use strict';
+
+const SUPABASE_URL = 'https://fraaipwqqqechmeyvsvb.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZyYWFpcHdxcXFlY2htZXl2c3ZiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc4ODk0MjQsImV4cCI6MjA5MzQ2NTQyNH0.mY7e9E8KJY-009BED0fldx_dkkoP2ScW7WlG6D4EGuA';
+
+const STORAGE_BASE = `${SUPABASE_URL}/storage/v1/object/public/feedback-photos/`;
+
+let allRows = [];
+let sortKey = 'created_at';
+let sortAsc = false;
+
+const $ = id => document.getElementById(id);
+const summaryCard = $('summaryCard');
+const chartCard = $('chartCard');
+const tableCard = $('tableCard');
+const dataBody = $('dataBody');
+const filterMode = $('filterMode');
+
+async function loadData() {
+  try {
+    const url = `${SUPABASE_URL}/rest/v1/feedback?select=*&order=created_at.desc&limit=1000`;
+    const resp = await fetch(url, {
+      headers: {
+        'apikey': SUPABASE_ANON_KEY,
+        'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+      },
+    });
+    if (!resp.ok) {
+      throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
+    }
+    allRows = await resp.json();
+    // Bereken afgeleide velden
+    for (const r of allRows) {
+      r.error_pct = r.user_count > 0
+        ? ((r.app_count - r.user_count) / r.user_count) * 100
+        : null;
+      r.diff = r.app_count - r.user_count;
+    }
+    $('lastUpdate').textContent =
+      `${allRows.length} feedback${allRows.length === 1 ? '' : 's'} • bijgewerkt ${new Date().toLocaleTimeString('nl-BE', { hour: '2-digit', minute: '2-digit' })}`;
+    renderAll();
+  } catch (err) {
+    console.error(err);
+    summaryCard.innerHTML = `<div class="error-msg">⚠️ Data laden mislukt: ${err.message}<br><br>Heb je de SQL voor read-access al gerund in Supabase?</div>`;
+  }
+}
+
+function renderAll() {
+  if (allRows.length === 0) {
+    summaryCard.innerHTML = `
+      <div class="loading">
+        Nog geen feedback in de database.<br>
+        Open de app, doe een telling, en klik door de feedback.
+      </div>`;
+    return;
+  }
+  renderSummary();
+  renderChart();
+  renderTable();
+  chartCard.classList.remove('hidden');
+  tableCard.classList.remove('hidden');
+}
+
+function renderSummary() {
+  const n = allRows.length;
+  const withFeedback = allRows.filter(r => r.user_count != null);
+  const errors = withFeedback.map(r => Math.abs(r.error_pct)).filter(e => Number.isFinite(e));
+  const avgErr = errors.length ? errors.reduce((a, b) => a + b, 0) / errors.length : 0;
+  const medianErr = errors.length ? [...errors].sort((a,b) => a-b)[Math.floor(errors.length/2)] : 0;
+  const under1 = errors.filter(e => e <= 1).length;
+  const under3 = errors.filter(e => e <= 3).length;
+  const photos = allRows.filter(r => r.image_path).length;
+
+  // Bereken aanbevolen factor (gewogen gemiddelde van best_sa_factor over rijen waar correctie gebeurde)
+  const corrected = withFeedback.filter(r =>
+    r.best_sa_factor != null && Math.abs(r.diff) > 0
+  );
+  const avgBest = corrected.length
+    ? corrected.reduce((s, r) => s + r.best_sa_factor, 0) / corrected.length
+    : null;
+
+  summaryCard.innerHTML = `
+    <h2>Samenvatting</h2>
+    <div class="summary">
+      <div class="stat">
+        <div class="value">${n}</div>
+        <div class="label">totaal feedbacks</div>
+      </div>
+      <div class="stat ${avgErr <= 1 ? '' : avgErr <= 3 ? 'warn' : 'error'}">
+        <div class="value">${avgErr.toFixed(1)}%</div>
+        <div class="label">gemiddelde fout</div>
+      </div>
+      <div class="stat">
+        <div class="value">${medianErr.toFixed(1)}%</div>
+        <div class="label">mediaan fout</div>
+      </div>
+      <div class="stat ${under1 / Math.max(errors.length, 1) >= 0.7 ? '' : 'warn'}">
+        <div class="value">${under1}/${errors.length}</div>
+        <div class="label">onder 1% fout</div>
+      </div>
+      <div class="stat">
+        <div class="value">${under3}/${errors.length}</div>
+        <div class="label">onder 3% fout</div>
+      </div>
+      <div class="stat">
+        <div class="value">${photos}</div>
+        <div class="label">met foto</div>
+      </div>
+    </div>
+    ${avgBest !== null ? `
+      <div class="recommendation">
+        <strong>💡 Aanbevolen sa_factor:</strong>
+        gemiddeld zou <strong>${avgBest.toFixed(2)}</strong> beter zijn dan de huidige 0.95
+        (gebaseerd op ${corrected.length} foto${corrected.length === 1 ? '' : "'s"} waar je corrigeerde).
+        ${corrected.length < 10 ? '<br><em>Te weinig data om een betrouwbare aanbeveling te doen — wacht tot ≥10 correcties.</em>' : ''}
+      </div>` : ''}
+  `;
+}
+
+function renderChart() {
+  const errors = allRows
+    .filter(r => Number.isFinite(r.error_pct))
+    .map(r => r.error_pct);
+  if (!errors.length) return;
+
+  // Histogram: -10% tot +10%, bins van 1%
+  const bins = new Array(21).fill(0);  // -10..10
+  for (const e of errors) {
+    const idx = Math.max(0, Math.min(20, Math.round(e) + 10));
+    bins[idx]++;
+  }
+
+  const canvas = $('errorChart');
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+
+  const padL = 40, padR = 20, padT = 20, padB = 30;
+  const chartW = W - padL - padR;
+  const chartH = H - padT - padB;
+  const maxBin = Math.max(1, ...bins);
+  const barW = chartW / bins.length;
+
+  // Y-as
+  ctx.strokeStyle = '#e1e8ed';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(padL, padT);
+  ctx.lineTo(padL, padT + chartH);
+  ctx.lineTo(padL + chartW, padT + chartH);
+  ctx.stroke();
+
+  // Y labels
+  ctx.fillStyle = '#6b7c8e';
+  ctx.font = '11px sans-serif';
+  ctx.textAlign = 'right';
+  for (let i = 0; i <= 4; i++) {
+    const v = Math.ceil(maxBin * i / 4);
+    const y = padT + chartH - (v / maxBin) * chartH;
+    ctx.fillText(v.toString(), padL - 5, y + 3);
+    if (i > 0) {
+      ctx.strokeStyle = '#f0f4f7';
+      ctx.beginPath();
+      ctx.moveTo(padL, y);
+      ctx.lineTo(padL + chartW, y);
+      ctx.stroke();
+    }
+  }
+
+  // Bars
+  for (let i = 0; i < bins.length; i++) {
+    const v = bins[i];
+    if (v === 0) continue;
+    const h = (v / maxBin) * chartH;
+    const x = padL + i * barW + 1;
+    const y = padT + chartH - h;
+    const errVal = i - 10;
+    // Color: green near 0, orange/red far
+    const absErr = Math.abs(errVal);
+    let color = '#2d8659';
+    if (absErr > 5) color = '#c0392b';
+    else if (absErr > 1) color = '#d68910';
+    ctx.fillStyle = color;
+    ctx.fillRect(x, y, barW - 2, h);
+  }
+
+  // X labels
+  ctx.fillStyle = '#6b7c8e';
+  ctx.textAlign = 'center';
+  for (let i = 0; i <= 20; i += 5) {
+    const x = padL + i * barW + barW / 2;
+    const v = i - 10;
+    ctx.fillText((v >= 0 ? '+' : '') + v + '%', x, padT + chartH + 18);
+  }
+
+  // Title-vrije zone: een verticale lijn op 0%
+  const zeroX = padL + 10 * barW + barW / 2;
+  ctx.strokeStyle = '#1a2a3a';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([3, 3]);
+  ctx.beginPath();
+  ctx.moveTo(zeroX, padT);
+  ctx.lineTo(zeroX, padT + chartH);
+  ctx.stroke();
+  ctx.setLineDash([]);
+}
+
+function renderTable() {
+  const filter = filterMode.value;
+  let rows = [...allRows];
+
+  if (filter === 'errors') {
+    rows = rows.filter(r => Math.abs(r.error_pct ?? 0) >= 1);
+  } else if (filter === 'confirmed') {
+    rows = rows.filter(r => r.notes === 'confirmed_correct');
+  } else if (filter === 'with-photo') {
+    rows = rows.filter(r => r.image_path);
+  }
+
+  // Sort
+  rows.sort((a, b) => {
+    let va = a[sortKey], vb = b[sortKey];
+    if (va == null && vb == null) return 0;
+    if (va == null) return 1;
+    if (vb == null) return -1;
+    if (typeof va === 'string') return sortAsc ? va.localeCompare(vb) : vb.localeCompare(va);
+    return sortAsc ? va - vb : vb - va;
+  });
+
+  $('rowCount').textContent = `${rows.length} rij${rows.length === 1 ? '' : 'en'}`;
+
+  // Update sort indicators
+  document.querySelectorAll('th').forEach(th => {
+    th.classList.remove('sorted-asc', 'sorted-desc');
+    if (th.dataset.key === sortKey) {
+      th.classList.add(sortAsc ? 'sorted-asc' : 'sorted-desc');
+    }
+  });
+
+  // Render rows
+  dataBody.innerHTML = rows.map(r => {
+    const date = new Date(r.created_at);
+    const dateStr = date.toLocaleDateString('nl-BE', { day: '2-digit', month: '2-digit' }) +
+                    ' ' + date.toLocaleTimeString('nl-BE', { hour: '2-digit', minute: '2-digit' });
+    const err = r.error_pct;
+    const errCls = err == null ? '' : (Math.abs(err) <= 1 ? 'err-good' : Math.abs(err) <= 3 ? 'err-warn' : 'err-bad');
+    const errStr = err == null ? '—' : `${err >= 0 ? '+' : ''}${err.toFixed(1)}%`;
+    const thumb = r.image_path
+      ? `<img class="thumb" src="${STORAGE_BASE}${r.image_path}" alt="" loading="lazy" onclick="openLightbox('${r.image_path}')">`
+      : `<div class="thumb-empty">geen</div>`;
+    return `
+      <tr>
+        <td>${dateStr}</td>
+        <td>${thumb}</td>
+        <td class="num">${r.app_count ?? '—'}</td>
+        <td class="num">${r.user_count ?? '—'}</td>
+        <td class="num ${errCls}">${errStr}</td>
+        <td class="num">${r.sa_factor != null ? r.sa_factor.toFixed(2) : '—'}</td>
+        <td class="num">${r.best_sa_factor != null ? r.best_sa_factor.toFixed(2) : '—'}</td>
+        <td class="num">${r.num_blobs ?? '—'}</td>
+        <td class="num">${r.num_singles ?? '—'}</td>
+        <td class="num">${r.num_small_clumps ?? '—'}</td>
+        <td class="num">${r.num_medium_clumps ?? '—'}</td>
+        <td class="num">${r.num_large_clumps ?? '—'}</td>
+        <td class="num">${r.largest_blob_area ?? '—'}</td>
+        <td style="color: var(--muted); font-size: 0.8rem;">${r.app_version ?? '—'}</td>
+      </tr>`;
+  }).join('');
+}
+
+// Sortable headers
+document.querySelectorAll('th[data-key]').forEach(th => {
+  th.addEventListener('click', () => {
+    const key = th.dataset.key;
+    if (sortKey === key) sortAsc = !sortAsc;
+    else { sortKey = key; sortAsc = false; }
+    renderTable();
+  });
+});
+
+filterMode.addEventListener('change', renderTable);
+
+// Lightbox
+function openLightbox(path) {
+  $('lightboxImg').src = `${STORAGE_BASE}${path}`;
+  $('lightbox').classList.add('show');
+}
+window.openLightbox = openLightbox;
+$('lightbox').addEventListener('click', () => $('lightbox').classList.remove('show'));
+
+// Boot
+loadData();
+</script>
+</body>
+</html>
