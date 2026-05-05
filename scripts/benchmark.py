@@ -8,8 +8,13 @@ import csv
 import os
 import sys
 import argparse
+from pathlib import Path
 import numpy as np
 import cv2
+
+ROOT = Path(__file__).resolve().parent.parent
+TEST_FILES = ROOT / 'test-files'
+RESULTS = ROOT / 'benchmark_results'
 
 # --- Algorithm constants (mirrors index.html) ---
 DARK_THRESHOLD = 75
@@ -21,7 +26,7 @@ MIN_SINGLE_AREA = 150.0
 CLUMP_RATIO_THRESHOLD = 1.6
 LARGE_CLUMP_RATIO = 6.0
 LARGE_CLUMP_OVERLAP = 1.4
-DEFAULT_SA_FACTOR = 0.80
+DEFAULT_SA_FACTOR = 0.97
 
 
 def find_bin_mask(blurred, params=None):
@@ -93,13 +98,93 @@ def detect_blobs(img_bgr, params=None):
 
 def estimate_single_area(areas, sa_factor, params=None):
     """
-    Robust single-blob area estimator: log-space histogram peak.
+    Lower-half median: median of the smallest 50% of blob areas.
 
-    Linear-bin histogram peak (used previously) was very sensitive to small noise
-    blobs — when many tiny edge artifacts exist, the peak gets pulled to the floor
-    bucket, drastically underestimating the typical tadpole area and inflating clump
-    counts. Log-space binning gives equal weight to small and large area regimes
-    and is robust to that failure mode.
+    Singles dominate the lower half; clumps inflate the upper half. The
+    previous log-histogram peak (kept as estimate_single_area_v1_peak below
+    for reference) was systematically biased toward the clump cluster on
+    photos with heavy clumping.
+
+    Benchmark on 46 ground-truth photos: MAPE 11.4% → 9.8%; within 10%
+    of truth 46% → 65%; bias -11.6 → +1.3.
+    """
+    p = params or {}
+    min_single = p.get('min_single_area', MIN_SINGLE_AREA)
+    if not areas:
+        return min_single * sa_factor
+    if len(areas) < 3:
+        return max(min_single, statistics_median(areas)) * sa_factor
+    sorted_areas = sorted(areas)
+    half = sorted_areas[: max(3, len(sorted_areas) // 2)]
+    return max(min_single, statistics_median(half)) * sa_factor
+
+
+def estimate_single_area_v1_peak(areas, sa_factor, params=None):
+    """v1 (kept for benchmarking comparison): log-space histogram global peak."""
+    p = params or {}
+    min_single = p.get('min_single_area', MIN_SINGLE_AREA)
+    if not areas:
+        return min_single * sa_factor
+    if len(areas) < 3:
+        return max(min_single, statistics_median(areas)) * sa_factor
+    log_areas = np.log(np.asarray(areas, dtype=np.float64))
+    hist, edges = np.histogram(log_areas, bins=30)
+    peak = int(np.argmax(hist))
+    log_peak = (edges[peak] + edges[peak + 1]) / 2.0
+    peak_area = float(np.exp(log_peak))
+    return max(min_single, peak_area) * sa_factor
+
+
+def estimate_single_area_v2(areas, sa_factor, params=None):
+    """
+    v2: leftmost-mode estimator. Singles are always smaller than clumps, so the
+    correct mode is the leftmost substantial peak in the log-area histogram, not
+    the global peak. v1 (global peak) was systematically biased toward clumps when
+    >50% of blobs were clumps, leading to undercounting (~11% MAPE on benchmark).
+
+    Steps:
+      1. Smooth log-area histogram with a 3-bin moving average (denoise jitter).
+      2. Find local maxima with at least 30% of the global max bin count.
+      3. Return the LEFTMOST such peak (= singles mode).
+    """
+    p = params or {}
+    min_single = p.get('min_single_area', MIN_SINGLE_AREA)
+    rel_thresh = p.get('mode_rel_threshold', 0.30)
+    if not areas:
+        return min_single * sa_factor
+    if len(areas) < 3:
+        return max(min_single, statistics_median(areas)) * sa_factor
+
+    log_areas = np.log(np.asarray(areas, dtype=np.float64))
+    hist, edges = np.histogram(log_areas, bins=30)
+
+    # 3-bin moving average for noise robustness
+    smooth = np.convolve(hist, np.ones(3) / 3.0, mode='same')
+    threshold = smooth.max() * rel_thresh
+
+    chosen = int(np.argmax(smooth))  # fallback = global peak
+    for i in range(len(smooth)):
+        if smooth[i] < threshold:
+            continue
+        left_ok = (i == 0) or smooth[i] >= smooth[i - 1]
+        right_ok = (i == len(smooth) - 1) or smooth[i] >= smooth[i + 1]
+        if left_ok and right_ok:
+            chosen = i
+            break
+
+    log_peak = (edges[chosen] + edges[chosen + 1]) / 2.0
+    peak_area = float(np.exp(log_peak))
+    return max(min_single, peak_area) * sa_factor
+
+
+def estimate_single_area_v3(areas, sa_factor, params=None):
+    """
+    v3: lower-half median. The smallest 50% of blobs are dominated by singles;
+    the upper half is contaminated by clumps. Taking the median of the lower
+    half tracks the true single-area without being pulled up by clumps.
+
+    More robust than v2 (leftmost mode) because it doesn't get fooled by tiny
+    noise blobs that form their own small peak.
     """
     p = params or {}
     min_single = p.get('min_single_area', MIN_SINGLE_AREA)
@@ -108,12 +193,51 @@ def estimate_single_area(areas, sa_factor, params=None):
     if len(areas) < 3:
         return max(min_single, statistics_median(areas)) * sa_factor
 
+    sorted_areas = sorted(areas)
+    half = sorted_areas[: max(3, len(sorted_areas) // 2)]
+    return max(min_single, statistics_median(half)) * sa_factor
+
+
+def estimate_single_area_v4(areas, sa_factor, params=None):
+    """
+    v4: iterative refinement. Start from the global log-histogram peak, then
+    classify candidate singles (area < clump_threshold * peak) and recompute
+    the peak from those candidates. Converges in 2-3 iterations.
+
+    This corrects for the case where the global peak sits on doubles (heavy
+    clumping) by progressively excluding clump-area blobs from the estimation.
+    """
+    p = params or {}
+    min_single = p.get('min_single_area', MIN_SINGLE_AREA)
+    clump_ratio = p.get('clump_ratio_threshold', CLUMP_RATIO_THRESHOLD)
+    if not areas:
+        return min_single * sa_factor
+    if len(areas) < 3:
+        return max(min_single, statistics_median(areas)) * sa_factor
+
     log_areas = np.log(np.asarray(areas, dtype=np.float64))
-    hist, edges = np.histogram(log_areas, bins=30)
-    peak = int(np.argmax(hist))
-    log_peak = (edges[peak] + edges[peak + 1]) / 2.0
-    peak_area = float(np.exp(log_peak))
-    return max(min_single, peak_area) * sa_factor
+
+    def peak_of(log_vals, bins=30):
+        if len(log_vals) < 3:
+            return float(np.exp(np.median(log_vals)))
+        hist, edges = np.histogram(log_vals, bins=bins)
+        idx = int(np.argmax(hist))
+        return float(np.exp((edges[idx] + edges[idx + 1]) / 2.0))
+
+    estimate = peak_of(log_areas)
+    for _ in range(3):
+        # Candidates = areas plausibly singles (below clump threshold with margin)
+        candidate_mask = log_areas < np.log(estimate * clump_ratio)
+        candidates = log_areas[candidate_mask]
+        if len(candidates) < 5:
+            break
+        new_estimate = peak_of(candidates, bins=20)
+        if abs(new_estimate - estimate) / estimate < 0.02:
+            estimate = new_estimate
+            break
+        estimate = new_estimate
+
+    return max(min_single, estimate) * sa_factor
 
 
 def statistics_median(seq):
@@ -126,15 +250,43 @@ def statistics_median(seq):
     return (s[n // 2 - 1] + s[n // 2]) / 2
 
 
+def blobs_to_count_area(blobs, sa_factor, params=None):
+    """
+    v5 strategy: count = total_dark_area / single_area.
+
+    Skips per-blob clump classification entirely. Empirically the per-photo
+    'ideal' single area (total_dark/truth) is much more stable across photos
+    than the histogram peak, so this approach is more robust to clumping
+    severity. Distributes count proportionally to each blob's area (just for
+    visualization — it doesn't affect the total).
+    """
+    p = params or {}
+    estimator = p.get('estimator', estimate_single_area)
+    if not blobs:
+        return 0, [], None
+    single_area = estimator([b['area'] for b in blobs], sa_factor, params)
+    total_dark = sum(b['area'] for b in blobs)
+    total = max(0, int(round(total_dark / single_area)))
+    detections = []
+    for b in blobs:
+        count = max(1, int(round(b['area'] / single_area)))
+        detections.append({'cx': b['cx'], 'cy': b['cy'], 'count': count, 'area': b['area']})
+    return total, detections, single_area
+
+
 def blobs_to_count(blobs, sa_factor, params=None):
     p = params or {}
     clump_ratio = p.get('clump_ratio_threshold', CLUMP_RATIO_THRESHOLD)
     large_clump_ratio = p.get('large_clump_ratio', LARGE_CLUMP_RATIO)
     large_clump_overlap = p.get('large_clump_overlap', LARGE_CLUMP_OVERLAP)
+    estimator = p.get('estimator', estimate_single_area)
+    counter = p.get('counter', None)
+    if counter == 'area':
+        return blobs_to_count_area(blobs, sa_factor, params)
 
     if not blobs:
         return 0, [], None
-    single_area = estimate_single_area([b['area'] for b in blobs], sa_factor, params)
+    single_area = estimator([b['area'] for b in blobs], sa_factor, params)
     detections = []
     total = 0
     for b in blobs:
@@ -156,12 +308,12 @@ def count_tadpoles(img_bgr, sa_factor=DEFAULT_SA_FACTOR, params=None):
     return total, detections, single_area, blobs
 
 
-def best_sa_factor_for(blobs, target):
+def best_sa_factor_for(blobs, target, params=None):
     """Sweep sa_factor 0.60..1.30 and return the factor that best matches target."""
     best = None
     for i in range(71):
         f = 0.60 + i * 0.01
-        total, _, _ = blobs_to_count(blobs, f)
+        total, _, _ = blobs_to_count(blobs, f, params)
         diff = abs(total - target)
         if best is None or diff < best['diff']:
             best = {'factor': round(f, 2), 'predicted': total, 'diff': diff}
@@ -170,11 +322,32 @@ def best_sa_factor_for(blobs, target):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--csv', default='test-files/feedback_rows.csv')
-    parser.add_argument('--dir', default='test-files')
+    parser.add_argument('--csv', default=str(TEST_FILES / 'feedback_rows.csv'))
+    parser.add_argument('--dir', default=str(TEST_FILES))
     parser.add_argument('--sa-factor', type=float, default=DEFAULT_SA_FACTOR)
-    parser.add_argument('--out', default='benchmark_results.csv')
+    parser.add_argument('--out', default=str(RESULTS / 'benchmark_results.csv'))
+    parser.add_argument('--algo', choices=['v1', 'v2', 'v3', 'v4', 'area'], default='v3',
+                        help='v1=global peak (legacy), v2=leftmost mode, v3=lower-half median '
+                             '(current production), v4=iterative refinement, '
+                             'area=total_dark/single_area (no clump logic)')
+    parser.add_argument('--single-area', type=float, default=None,
+                        help='For --algo area: override estimated single area with a fixed value')
     args = parser.parse_args()
+
+    estimators = {
+        'v1': estimate_single_area_v1_peak,
+        'v2': estimate_single_area_v2,
+        'v3': estimate_single_area,  # current production: lower-half median
+        'v4': estimate_single_area_v4,
+        'area': estimate_single_area,
+    }
+    params = {'estimator': estimators[args.algo]}
+    if args.algo == 'area':
+        params['counter'] = 'area'
+    if args.single_area is not None:
+        # Override estimator with constant
+        const = args.single_area
+        params['estimator'] = lambda areas, sa, p=None: const * sa
 
     rows = []
     with open(args.csv, 'r', newline='') as f:
@@ -196,8 +369,10 @@ def main():
         if img is None:
             print(f"  !! kon foto niet lezen: {path}")
             continue
-        total, _, single_area, blobs = count_tadpoles(img, args.sa_factor)
-        best = best_sa_factor_for(blobs, truth)
+        blobs_only, _ = detect_blobs(img, params)
+        total, _, single_area = blobs_to_count(blobs_only, args.sa_factor, params)
+        blobs = blobs_only
+        best = best_sa_factor_for(blobs, truth, params)
         diff = total - truth
         abs_errors.append(abs(diff))
         rel_errors.append(abs(diff) / truth if truth > 0 else 0)

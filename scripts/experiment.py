@@ -5,10 +5,15 @@ Compares the current algorithm against several variants on the full test set.
 """
 import csv
 import os
+import sys
 import statistics
+from pathlib import Path
 import numpy as np
 import cv2
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import benchmark as B
+from benchmark import TEST_FILES
 
 
 def estimate_single_area_median(areas, sa_factor, params=None):
@@ -119,7 +124,7 @@ def evaluate(rows, dir_, estimator_fn, sa_factor, name, detect_params=None):
 
 def main():
     rows = []
-    with open('test-files/feedback_rows.csv', 'r', newline='') as f:
+    with open(TEST_FILES / 'feedback_rows.csv', 'r', newline='') as f:
         for r in csv.DictReader(f):
             if r.get('image_path'):
                 rows.append(r)
@@ -129,47 +134,47 @@ def main():
     print('-' * 110)
 
     # Baseline (current algorithm)
-    evaluate(rows, 'test-files', B.estimate_single_area, 0.95,
+    evaluate(rows, str(TEST_FILES), B.estimate_single_area, 0.95,
              "current (histogram peak), sa=0.95")
 
     # New estimators
-    evaluate(rows, 'test-files', estimate_single_area_median, 0.95,
+    evaluate(rows, str(TEST_FILES), estimate_single_area_median, 0.95,
              "median (cutoff=80), sa=0.95")
-    evaluate(rows, 'test-files', estimate_single_area_median, 1.00,
+    evaluate(rows, str(TEST_FILES), estimate_single_area_median, 1.00,
              "median (cutoff=80), sa=1.00")
-    evaluate(rows, 'test-files', estimate_single_area_median, 1.10,
+    evaluate(rows, str(TEST_FILES), estimate_single_area_median, 1.10,
              "median (cutoff=80), sa=1.10")
-    evaluate(rows, 'test-files', estimate_single_area_median, 1.20,
+    evaluate(rows, str(TEST_FILES), estimate_single_area_median, 1.20,
              "median (cutoff=80), sa=1.20")
-    evaluate(rows, 'test-files', estimate_single_area_median, 1.30,
+    evaluate(rows, str(TEST_FILES), estimate_single_area_median, 1.30,
              "median (cutoff=80), sa=1.30")
 
-    evaluate(rows, 'test-files', estimate_single_area_trimmed, 0.95,
+    evaluate(rows, str(TEST_FILES), estimate_single_area_trimmed, 0.95,
              "trimmed mean (25-65%), sa=0.95")
-    evaluate(rows, 'test-files', estimate_single_area_trimmed, 1.10,
+    evaluate(rows, str(TEST_FILES), estimate_single_area_trimmed, 1.10,
              "trimmed mean (25-65%), sa=1.10")
-    evaluate(rows, 'test-files', estimate_single_area_trimmed, 1.20,
+    evaluate(rows, str(TEST_FILES), estimate_single_area_trimmed, 1.20,
              "trimmed mean (25-65%), sa=1.20")
 
-    evaluate(rows, 'test-files', estimate_single_area_log_kde, 0.95,
+    evaluate(rows, str(TEST_FILES), estimate_single_area_log_kde, 0.95,
              "log-space hist peak, sa=0.95")
-    evaluate(rows, 'test-files', estimate_single_area_log_kde, 1.00,
+    evaluate(rows, str(TEST_FILES), estimate_single_area_log_kde, 1.00,
              "log-space hist peak, sa=1.00")
-    evaluate(rows, 'test-files', estimate_single_area_log_kde, 1.10,
+    evaluate(rows, str(TEST_FILES), estimate_single_area_log_kde, 1.10,
              "log-space hist peak, sa=1.10")
 
     # Try with stricter MIN_BLOB_AREA in detect_blobs
     print("\n--- with MIN_BLOB_AREA=80 (stricter noise filter) ---")
     p80 = {'min_blob_area': 80}
-    evaluate(rows, 'test-files', B.estimate_single_area, 0.95,
+    evaluate(rows, str(TEST_FILES), B.estimate_single_area, 0.95,
              "current, MIN_BLOB=80, sa=0.95", p80)
-    evaluate(rows, 'test-files', estimate_single_area_median, 0.95,
+    evaluate(rows, str(TEST_FILES), estimate_single_area_median, 0.95,
              "median, MIN_BLOB=80, sa=0.95", p80)
-    evaluate(rows, 'test-files', estimate_single_area_median, 1.00,
+    evaluate(rows, str(TEST_FILES), estimate_single_area_median, 1.00,
              "median, MIN_BLOB=80, sa=1.00", p80)
-    evaluate(rows, 'test-files', estimate_single_area_median, 1.10,
+    evaluate(rows, str(TEST_FILES), estimate_single_area_median, 1.10,
              "median, MIN_BLOB=80, sa=1.10", p80)
-    evaluate(rows, 'test-files', estimate_single_area_median, 1.20,
+    evaluate(rows, str(TEST_FILES), estimate_single_area_median, 1.20,
              "median, MIN_BLOB=80, sa=1.20", p80)
 
 

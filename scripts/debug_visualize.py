@@ -3,10 +3,15 @@ Debug: visualize the algorithm pipeline for problem images.
 Saves intermediate masks (bin mask, dark mask, blobs) so we can see what's going wrong.
 """
 import os
+import sys
 import argparse
+from pathlib import Path
 import numpy as np
 import cv2
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import benchmark as B
+from benchmark import TEST_FILES, ROOT
 
 
 def visualize(img_bgr, sa_factor, out_prefix):
@@ -65,8 +70,8 @@ def visualize(img_bgr, sa_factor, out_prefix):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('images', nargs='+', help='image filenames (in test-files/ by default)')
-    parser.add_argument('--dir', default='test-files')
-    parser.add_argument('--out-dir', default='debug_out')
+    parser.add_argument('--dir', default=str(TEST_FILES))
+    parser.add_argument('--out-dir', default=str(ROOT / 'debug_out'))
     parser.add_argument('--sa-factor', type=float, default=0.95)
     args = parser.parse_args()
 

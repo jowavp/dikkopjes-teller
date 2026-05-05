@@ -1,10 +1,15 @@
 """Combine the best parameters from earlier experiments and look at per-image breakdown."""
 import csv
 import os
+import sys
 import statistics
+from pathlib import Path
 import numpy as np
 import cv2
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import benchmark as B
+from benchmark import TEST_FILES
 from experiment import (
     estimate_single_area_log_kde,
     blobs_to_count_with_estimator,
@@ -53,7 +58,7 @@ def fmt(m, name):
 
 def main():
     rows = []
-    with open('test-files/feedback_rows.csv', 'r', newline='') as f:
+    with open(TEST_FILES / 'feedback_rows.csv', 'r', newline='') as f:
         for r in csv.DictReader(f):
             if r.get('image_path'):
                 rows.append(r)
@@ -67,7 +72,7 @@ def main():
         for mba in [60, 80, 100]:
             for sa in [0.80, 0.85, 0.90, 0.95, 1.00]:
                 p = {'min_blob_area': mba, 'dark_threshold': dt}
-                rs = evaluate_detail(rows, 'test-files', estimate_single_area_log_kde, sa,
+                rs = evaluate_detail(rows, str(TEST_FILES), estimate_single_area_log_kde, sa,
                                      f"log-peak, DARK={dt}, MIN_BLOB={mba}, sa={sa:.2f}", p)
                 m = metrics(rs)
                 name = f"log-peak DARK={dt} MIN_BLOB={mba} sa={sa:.2f}"
@@ -82,7 +87,7 @@ def main():
         for mba in [60, 80, 100]:
             for sa in [0.80, 0.85, 0.90, 0.95, 1.00]:
                 p = {'min_blob_area': mba, 'dark_threshold': dt}
-                rs = evaluate_detail(rows, 'test-files', B.estimate_single_area, sa,
+                rs = evaluate_detail(rows, str(TEST_FILES), B.estimate_single_area, sa,
                                      '', p)
                 m = metrics(rs)
                 name = f"current  DARK={dt} MIN_BLOB={mba} sa={sa:.2f}"
