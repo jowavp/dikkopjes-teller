@@ -1,17 +1,55 @@
 'use strict';
 
-const APP_VERSION = '0.5.0-lower-half';  // bump on releases
+const APP_VERSION = '0.6.0-detection-modes';  // bump on releases
 document.getElementById('appVersion').textContent = 'v' + APP_VERSION;
 
-const DARK_THRESHOLD = 75;
+// Threshold used for bin/tray detection (finding WHERE the bak is in the photo).
+// Independent of the tadpole detection mode below — tweaking this would affect
+// which region we constrain counting to, not how individual frogs are detected.
+const BIN_DARK_THRESHOLD = 75;
 const BIN_BRIGHT_THRESHOLD = 95;
 const DENSITY_BLUR = 201;
 const DENSITY_THRESHOLD = 6;
-const MIN_BLOB_AREA = 80;
 const MIN_SINGLE_AREA = 150.0;
 const CLUMP_RATIO_THRESHOLD = 1.6;
 const LARGE_CLUMP_RATIO = 6.0;
 const LARGE_CLUMP_OVERLAP = 1.4;
+
+/**
+ * Tadpole detection modes. Choose how aggressively we binarize the in-bin
+ * grayscale into "tadpole" vs "background" pixels.
+ *
+ * Benchmark (46 ground-truth photos):
+ *   standard  : MAPE 9.8%, 63% within 10% of truth, bias -7.5
+ *   sensitive : MAPE 8.5%, 78% within 10% of truth, bias -0.9
+ *
+ * sensitive wins on the within-10% metric (more consistent for the user) but
+ * regresses on photos where standard already nailed it (~5-15 frog overcount
+ * because shadows/dim non-frog regions creep in past the lower threshold).
+ * standard is a safer default for clean, well-lit photos.
+ */
+const DETECTION_MODES = {
+  standard: {
+    label: 'Standaard',
+    darkThreshold: 75,
+    morphClose: true,
+    minBlobArea: 80,
+    defaultSaFactor: 1.00,
+  },
+  sensitive: {
+    label: 'Gevoelig',
+    darkThreshold: 50,
+    morphClose: false,
+    minBlobArea: 30,
+    defaultSaFactor: 1.20,
+  },
+};
+const DEFAULT_DETECTION_MODE = 'sensitive';
+
+function getDetectionMode() {
+  const m = localStorage.getItem('detectionMode');
+  return (m && DETECTION_MODES[m]) ? m : DEFAULT_DETECTION_MODE;
+}
 
 let cvReady = false;
 let currentImage = null;
@@ -26,6 +64,7 @@ const controls = $('controls');
 const processBtn = $('processBtn');
 const saFactorInput = $('saFactor');
 const saFactorValue = $('saFactorValue');
+const detectionModeSelect = $('detectionMode');
 const resultCard = $('resultCard');
 const resultCount = $('resultCount');
 const resultCanvas = $('resultCanvas');
@@ -100,6 +139,25 @@ saFactorInput.addEventListener('input', () => {
 });
 
 processBtn.addEventListener('click', processImage);
+
+// --- Detection mode (persists in localStorage) ---
+function applyDetectionMode(mode, opts = {}) {
+  if (!DETECTION_MODES[mode]) mode = DEFAULT_DETECTION_MODE;
+  localStorage.setItem('detectionMode', mode);
+  if (detectionModeSelect) detectionModeSelect.value = mode;
+  const cfg = DETECTION_MODES[mode];
+  // Reset slider to this mode's optimum unless we're explicitly preserving
+  if (!opts.preserveSlider) {
+    saFactorInput.value = cfg.defaultSaFactor.toFixed(2);
+    saFactorValue.textContent = cfg.defaultSaFactor.toFixed(2);
+  }
+}
+applyDetectionMode(getDetectionMode());
+
+detectionModeSelect?.addEventListener('change', () => {
+  applyDetectionMode(detectionModeSelect.value);
+  if (currentImage && cvReady) processImage();
+});
 
 function showError(msg) {
   status.textContent = msg;
@@ -178,6 +236,8 @@ downloadBtn.addEventListener('click', () => {
  * Geeft {blobs, src_rgb}, waarbij blobs = [{cx, cy, area}].
  */
 function detectBlobs(img) {
+  const cfg = DETECTION_MODES[getDetectionMode()];
+
   const srcCanvas = document.createElement('canvas');
   srcCanvas.width = img.naturalWidth;
   srcCanvas.height = img.naturalHeight;
@@ -192,11 +252,13 @@ function detectBlobs(img) {
   const binMask = findBinMask(blurred);
 
   const dark = new cv.Mat();
-  cv.threshold(blurred, dark, DARK_THRESHOLD, 255, cv.THRESH_BINARY_INV);
+  cv.threshold(blurred, dark, cfg.darkThreshold, 255, cv.THRESH_BINARY_INV);
   cv.bitwise_and(dark, binMask, dark);
-  const closeKernel = cv.Mat.ones(3, 3, cv.CV_8U);
-  cv.morphologyEx(dark, dark, cv.MORPH_CLOSE, closeKernel);
-  closeKernel.delete();
+  if (cfg.morphClose) {
+    const closeKernel = cv.Mat.ones(3, 3, cv.CV_8U);
+    cv.morphologyEx(dark, dark, cv.MORPH_CLOSE, closeKernel);
+    closeKernel.delete();
+  }
 
   const labels = new cv.Mat();
   const stats = new cv.Mat();
@@ -206,7 +268,7 @@ function detectBlobs(img) {
   const blobs = [];
   for (let i = 1; i < numLabels; i++) {
     const area = stats.intAt(i, cv.CC_STAT_AREA);
-    if (area < MIN_BLOB_AREA) continue;
+    if (area < cfg.minBlobArea) continue;
     const cx = Math.round(centroids.doubleAt(i, 0));
     const cy = Math.round(centroids.doubleAt(i, 1));
     blobs.push({ area, cx, cy });
@@ -326,9 +388,9 @@ function countTadpoles(img, saFactor) {
 }
 
 function findBinMask(blurred) {
-  // 1. Dark pixels
+  // 1. Dark pixels — uses BIN_DARK_THRESHOLD (independent of tadpole detection mode)
   const dark = new cv.Mat();
-  cv.threshold(blurred, dark, DARK_THRESHOLD, 255, cv.THRESH_BINARY_INV);
+  cv.threshold(blurred, dark, BIN_DARK_THRESHOLD, 255, cv.THRESH_BINARY_INV);
 
   // 2. Heavy blur = density map
   const density = new cv.Mat();

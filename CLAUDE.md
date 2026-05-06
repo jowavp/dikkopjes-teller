@@ -30,30 +30,57 @@ Scripts resolve paths via `__file__` so cwd doesn't matter.
 - `estimateSingleArea` in `app.js` and `estimate_single_area` in
   `scripts/benchmark.py` implement the same algorithm. The Python version
   is the benchmark source of truth — keep them aligned when changing.
+- `DETECTION_MODES` in `app.js` and Python's `DETECTION_MODES` in
+  `scripts/benchmark.py` must stay aligned (same threshold/min-area/close
+  flags per mode).
 - When `index.html` / `styles.css` / `app.js` change, bump `CACHE_VERSION`
   in `sw.js` so installed PWA clients pick up the new files.
 - When user-visible behavior changes, bump `APP_VERSION` in `app.js`
   (shown in footer).
 
-## Algorithm baseline
+## Detection modes
 
-Lower-half median of blob areas, default `sa_factor = 0.97`. On the 46
-ground-truth photos: MAPE 9.9%, 65% within 10%, bias +1.3. The previous
-global log-histogram peak gave MAPE 11.4% with -11.6 undercounting bias.
+The user picks between two detection modes (persisted in `localStorage`
+under key `detectionMode`). Switching mode resets the slider to that mode's
+default `sa_factor` and re-processes the current photo.
 
-The single-area estimator is the accuracy hot spot. Bin detection and
-blob detection are mature; the remaining error is in converting blob
-areas to counts via single-tadpole-area calibration.
+| mode      | dark thresh | morph close | min area | default sa_factor | MAPE | within-10% |
+|-----------|-------------|-------------|----------|-------------------|------|------------|
+| standard  | 75          | yes (3×3)   | 80       | 1.00              | 9.8% | 63%        |
+| sensitive | 50          | no          | 30       | 1.20              | 8.5% | 78%        |
 
-## Why ~10% may be the unsupervised floor
+`sensitive` is the default. It wins on aggregate metrics by detecting more
+frogs as separate blobs (so the area-counter has less work). Trade-off: on
+photos where `standard` already nailed the count, `sensitive` typically
+adds 5-15 extra counts (shadows or bright-but-dark non-frog regions slip
+past the lower threshold).
 
-`best_factor` per photo ranges 0.75-1.48. Linear regression on blob
-features (total_dark, mean_area, …) explains only R² ≈ 0.23 of the
-variance; with leave-one-out CV the best gain is MAPE 9.9% → 9.1%.
-The residual variance is driven by things invisible in the blob
-distribution: camera distance, lighting, water clarity, tadpole stage.
+Run benchmarks with `--detection {standard,sensitive}` to compare.
 
-Paths beyond ~9% likely need (in order of leverage): a reference-size
+## Single-area estimator
+
+Lower-half median of blob areas. Singles dominate the lower 50% of the
+area distribution; clumps inflate the upper half, so the median of the
+lower half tracks single-tadpole area robustly across clumping severity.
+Replaces an earlier global log-histogram peak that was systematically
+biased toward clumps.
+
+## Why ~8% may be the unsupervised floor
+
+We've explored several paths:
+- **Watershed/opening clump splitting** (`scripts/diag_watershed.py`):
+  failed because tadpoles in tight clumps merge into single connected
+  regions in the binary mask — no internal structure for distance-
+  transform to recover. Documented as `--algo watershed` in benchmark.py
+  for reference.
+- **Detection redesign** (`scripts/experiment_detection.py`): tested 25
+  variants. `sensitive` mode (threshold 50, no close, smaller min-area)
+  wins; adaptive/Otsu/percentile-based thresholds catastrophically fail.
+- **Per-photo factor regression** (`scripts/analyze_factor.py`): R² ≈
+  0.23, leave-one-out CV gives MAPE 9.9% → 9.1%. Limited by what blob
+  features can predict.
+
+Paths beyond ~8% likely need (in order of leverage): a reference-size
 object in the photo (gives true mm-per-pixel scale), per-user
-calibration learned from the existing feedback stream, or a much
-larger labelled dataset for a regression / tree-based model.
+calibration learned from the existing feedback stream, or a labelled
+dataset (~200+ photos) for a density-map CNN.

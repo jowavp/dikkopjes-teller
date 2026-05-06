@@ -28,6 +28,23 @@ LARGE_CLUMP_RATIO = 6.0
 LARGE_CLUMP_OVERLAP = 1.4
 DEFAULT_SA_FACTOR = 0.97
 
+# Detection modes (mirror app.js DETECTION_MODES). Keep in sync.
+DETECTION_MODES = {
+    'standard': {
+        'darkThreshold': 75,
+        'morphClose': True,
+        'minBlobArea': 80,
+        'defaultSaFactor': 1.00,
+    },
+    'sensitive': {
+        'darkThreshold': 50,
+        'morphClose': False,
+        'minBlobArea': 30,
+        'defaultSaFactor': 1.20,
+    },
+}
+DEFAULT_DETECTION_MODE = 'sensitive'
+
 
 def find_bin_mask(blurred, params=None):
     p = params or {}
@@ -73,8 +90,11 @@ def find_bin_mask(blurred, params=None):
 
 def detect_blobs(img_bgr, params=None):
     p = params or {}
-    dark_thr = p.get('dark_threshold', DARK_THRESHOLD)
-    min_blob_area = p.get('min_blob_area', MIN_BLOB_AREA)
+    mode_name = p.get('detection_mode', DEFAULT_DETECTION_MODE)
+    mode = DETECTION_MODES[mode_name]
+    dark_thr = p.get('dark_threshold', mode['darkThreshold'])
+    min_blob_area = p.get('min_blob_area', mode['minBlobArea'])
+    morph_close = p.get('morph_close', mode['morphClose'])
 
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
@@ -82,7 +102,8 @@ def detect_blobs(img_bgr, params=None):
 
     _, dark = cv2.threshold(blurred, dark_thr, 255, cv2.THRESH_BINARY_INV)
     dark = cv2.bitwise_and(dark, bin_mask)
-    dark = cv2.morphologyEx(dark, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+    if morph_close:
+        dark = cv2.morphologyEx(dark, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
 
     num, labels, stats, centroids = cv2.connectedComponentsWithStats(dark, connectivity=8)
     blobs = []
@@ -94,6 +115,52 @@ def detect_blobs(img_bgr, params=None):
         cy = int(round(centroids[i, 1]))
         blobs.append({'area': area, 'cx': cx, 'cy': cy})
     return blobs, bin_mask
+
+
+def detect_blobs_full(img_bgr, params=None):
+    """
+    Like detect_blobs() but each blob also carries `label` and `bbox`, and the
+    function returns the labels matrix so callers can extract per-blob masks
+    (needed by the watershed counter).
+
+    Backward-compat wrapper around detect_blobs would have meant changing
+    every caller of detect_blobs; this parallel function is cheaper.
+    """
+    p = params or {}
+    mode_name = p.get('detection_mode', DEFAULT_DETECTION_MODE)
+    mode = DETECTION_MODES[mode_name]
+    dark_thr = p.get('dark_threshold', mode['darkThreshold'])
+    min_blob_area = p.get('min_blob_area', mode['minBlobArea'])
+    morph_close = p.get('morph_close', mode['morphClose'])
+
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    bin_mask = find_bin_mask(blurred, params)
+
+    _, dark = cv2.threshold(blurred, dark_thr, 255, cv2.THRESH_BINARY_INV)
+    dark = cv2.bitwise_and(dark, bin_mask)
+    if morph_close:
+        dark = cv2.morphologyEx(dark, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+
+    num, labels, stats, centroids = cv2.connectedComponentsWithStats(dark, connectivity=8)
+    blobs = []
+    for i in range(1, num):
+        area = int(stats[i, cv2.CC_STAT_AREA])
+        if area < min_blob_area:
+            continue
+        blobs.append({
+            'area': area,
+            'cx': int(round(centroids[i, 0])),
+            'cy': int(round(centroids[i, 1])),
+            'label': i,
+            'bbox': (
+                int(stats[i, cv2.CC_STAT_LEFT]),
+                int(stats[i, cv2.CC_STAT_TOP]),
+                int(stats[i, cv2.CC_STAT_WIDTH]),
+                int(stats[i, cv2.CC_STAT_HEIGHT]),
+            ),
+        })
+    return blobs, bin_mask, labels
 
 
 def estimate_single_area(areas, sa_factor, params=None):
@@ -250,6 +317,114 @@ def statistics_median(seq):
     return (s[n // 2 - 1] + s[n // 2]) / 2
 
 
+def count_blob_watershed(blob, labels, single_area, params=None):
+    """
+    Count tadpoles in a single blob using a thresholded distance transform.
+
+    For one tadpole approximated as a circle of radius R, the distance transform
+    inside that blob peaks at R. For two touching tadpoles, the 'neck' between
+    them has small distance, so thresholding the distance transform at some
+    fraction of R splits the blob into separate connected components — one per
+    tadpole core.
+
+    Returns the number of cores found, with a minimum of 1.
+    """
+    p = params or {}
+    peak_thresh_ratio = p.get('peak_thresh_ratio', 0.45)
+
+    x, y, w, h = blob['bbox']
+    # Per-blob mask, padded by 1 pixel so distance transform sees a clean
+    # boundary even for blobs that touch the bbox edge
+    region = (labels[y:y + h, x:x + w] == blob['label']).astype(np.uint8) * 255
+    padded = cv2.copyMakeBorder(region, 1, 1, 1, 1, cv2.BORDER_CONSTANT, value=0)
+
+    dist = cv2.distanceTransform(padded, cv2.DIST_L2, 5)
+    if dist.max() == 0:
+        return 1
+
+    # Tadpole effective radius (equivalent-circle radius for the area)
+    radius = float(np.sqrt(single_area / np.pi))
+    threshold = peak_thresh_ratio * radius
+
+    _, peaks = cv2.threshold(dist, threshold, 255, cv2.THRESH_BINARY)
+    peaks = peaks.astype(np.uint8)
+    n, _ = cv2.connectedComponents(peaks)
+    return max(1, n - 1)  # subtract background label
+
+
+def count_blob_opening(blob, labels, single_area, params=None):
+    """
+    Alternative to watershed: morphological opening with an elliptical kernel
+    sized to a fraction of the tadpole radius. Opening removes thin features
+    (tails) while preserving round bodies. Counts the connected components
+    that survive.
+
+    Tadpoles have prominent tails that elongate the blob shape; pure distance-
+    transform cores tend to merge along tail-to-body connections. Opening
+    eats the tails first, leaving cleanly separated body cores.
+    """
+    p = params or {}
+    open_ratio = p.get('open_ratio', 0.6)  # fraction of single-tadpole radius
+
+    x, y, w, h = blob['bbox']
+    region = (labels[y:y + h, x:x + w] == blob['label']).astype(np.uint8) * 255
+    padded = cv2.copyMakeBorder(region, 2, 2, 2, 2, cv2.BORDER_CONSTANT, value=0)
+
+    radius = float(np.sqrt(single_area / np.pi))
+    k = max(3, int(round(open_ratio * radius)))
+    if k % 2 == 0:
+        k += 1
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+
+    opened = cv2.morphologyEx(padded, cv2.MORPH_OPEN, kernel)
+    n, _ = cv2.connectedComponents(opened)
+    return max(1, n - 1)
+
+
+def blobs_to_count_watershed(blobs, labels, sa_factor, params=None):
+    """
+    Count using watershed-style splitting: small/single blobs counted as 1,
+    larger ones split via thresholded distance transform (count = number of
+    distance-transform cores).
+
+    Falls back to area-based estimate for blobs where watershed under-counts
+    (cores < area/single_area * 0.6) — this catches very tight clumps where
+    cores merge into one.
+    """
+    p = params or {}
+    estimator = p.get('estimator', estimate_single_area)
+    clump_ratio = p.get('clump_ratio_threshold', CLUMP_RATIO_THRESHOLD)
+    use_fallback = p.get('watershed_use_fallback', False)
+    fallback_ratio = p.get('watershed_fallback_ratio', 0.6)
+    method = p.get('watershed_method', 'dist')  # 'dist' or 'open'
+    counter_fn = count_blob_opening if method == 'open' else count_blob_watershed
+
+    if not blobs:
+        return 0, [], None
+    single_area = estimator([b['area'] for b in blobs], sa_factor, params)
+
+    detections = []
+    total = 0
+    for b in blobs:
+        ratio = b['area'] / single_area
+        if ratio < clump_ratio:
+            count = 1
+        else:
+            ws_count = counter_fn(b, labels, single_area, params)
+            if use_fallback:
+                area_count = max(1, int(round(ratio)))
+                # If watershed badly under-counts a very large clump, trust area
+                if ws_count < fallback_ratio * area_count:
+                    count = area_count
+                else:
+                    count = ws_count
+            else:
+                count = ws_count
+        detections.append({'cx': b['cx'], 'cy': b['cy'], 'count': count, 'area': b['area']})
+        total += count
+    return total, detections, single_area
+
+
 def blobs_to_count_area(blobs, sa_factor, params=None):
     """
     v5 strategy: count = total_dark_area / single_area.
@@ -320,16 +495,42 @@ def best_sa_factor_for(blobs, target, params=None):
     return best
 
 
+def best_sa_factor_for_watershed(blobs, labels, target, params=None):
+    """Same sweep as best_sa_factor_for but using the watershed counter."""
+    best = None
+    for i in range(71):
+        f = 0.60 + i * 0.01
+        total, _, _ = blobs_to_count_watershed(blobs, labels, f, params)
+        diff = abs(total - target)
+        if best is None or diff < best['diff']:
+            best = {'factor': round(f, 2), 'predicted': total, 'diff': diff}
+    return best
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--csv', default=str(TEST_FILES / 'feedback_rows.csv'))
     parser.add_argument('--dir', default=str(TEST_FILES))
     parser.add_argument('--sa-factor', type=float, default=DEFAULT_SA_FACTOR)
     parser.add_argument('--out', default=str(RESULTS / 'benchmark_results.csv'))
-    parser.add_argument('--algo', choices=['v1', 'v2', 'v3', 'v4', 'area'], default='v3',
+    parser.add_argument('--detection', choices=list(DETECTION_MODES.keys()),
+                        default=DEFAULT_DETECTION_MODE,
+                        help='Detection mode: standard (legacy) or sensitive (lower threshold, '
+                             'no close, smaller min-area). Mirrors app.js DETECTION_MODES.')
+    parser.add_argument('--algo', choices=['v1', 'v2', 'v3', 'v4', 'area', 'watershed'],
+                        default='v3',
                         help='v1=global peak (legacy), v2=leftmost mode, v3=lower-half median '
                              '(current production), v4=iterative refinement, '
-                             'area=total_dark/single_area (no clump logic)')
+                             'area=total_dark/single_area (no clump logic), '
+                             'watershed=split clumps via distance-transform peaks')
+    parser.add_argument('--peak-thresh-ratio', type=float, default=0.45,
+                        help='For --algo watershed (dist method): distance-transform threshold '
+                             'as fraction of tadpole radius (lower = more permissive splitting)')
+    parser.add_argument('--watershed-method', choices=['dist', 'open'], default='dist',
+                        help='dist=distance-transform threshold, open=morphological opening')
+    parser.add_argument('--open-ratio', type=float, default=0.6,
+                        help='For --watershed-method open: ellipse kernel size as fraction of '
+                             'tadpole radius')
     parser.add_argument('--single-area', type=float, default=None,
                         help='For --algo area: override estimated single area with a fixed value')
     args = parser.parse_args()
@@ -340,10 +541,22 @@ def main():
         'v3': estimate_single_area,  # current production: lower-half median
         'v4': estimate_single_area_v4,
         'area': estimate_single_area,
+        'watershed': estimate_single_area,
     }
-    params = {'estimator': estimators[args.algo]}
+    params = {
+        'estimator': estimators[args.algo],
+        'detection_mode': args.detection,
+        'peak_thresh_ratio': args.peak_thresh_ratio,
+        'watershed_method': args.watershed_method,
+        'open_ratio': args.open_ratio,
+    }
+    # If user didn't override sa_factor, use the mode's default
+    if args.sa_factor == DEFAULT_SA_FACTOR:
+        args.sa_factor = DETECTION_MODES[args.detection]['defaultSaFactor']
     if args.algo == 'area':
         params['counter'] = 'area'
+    if args.algo == 'watershed':
+        params['counter'] = 'watershed'
     if args.single_area is not None:
         # Override estimator with constant
         const = args.single_area
@@ -369,10 +582,15 @@ def main():
         if img is None:
             print(f"  !! kon foto niet lezen: {path}")
             continue
-        blobs_only, _ = detect_blobs(img, params)
-        total, _, single_area = blobs_to_count(blobs_only, args.sa_factor, params)
-        blobs = blobs_only
-        best = best_sa_factor_for(blobs, truth, params)
+        if args.algo == 'watershed':
+            blobs, _, labels_mat = detect_blobs_full(img, params)
+            total, _, single_area = blobs_to_count_watershed(blobs, labels_mat,
+                                                             args.sa_factor, params)
+            best = best_sa_factor_for_watershed(blobs, labels_mat, truth, params)
+        else:
+            blobs, _ = detect_blobs(img, params)
+            total, _, single_area = blobs_to_count(blobs, args.sa_factor, params)
+            best = best_sa_factor_for(blobs, truth, params)
         diff = total - truth
         abs_errors.append(abs(diff))
         rel_errors.append(abs(diff) / truth if truth > 0 else 0)

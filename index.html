@@ -54,10 +54,18 @@
 
     <div class="controls hidden" id="controls">
       <div class="control-group">
+        <label for="detectionMode">Detectiemodus</label>
+        <select id="detectionMode">
+          <option value="standard">Standaard — beste bij goed belichte foto's</option>
+          <option value="sensitive">Gevoelig — beste bij dichte kluiten of donkere bakken</option>
+        </select>
+        <div class="help">We onthouden je keuze voor volgende foto's.</div>
+      </div>
+      <div class="control-group">
         <label for="saFactor">
-          Calibratie: <span id="saFactorValue">0.97</span>
+          Calibratie: <span id="saFactorValue">1.20</span>
         </label>
-        <input type="range" id="saFactor" min="0.70" max="1.25" step="0.01" value="0.97">
+        <input type="range" id="saFactor" min="0.70" max="1.40" step="0.01" value="1.20">
         <div class="help">Lager = meer dikkopjes geteld (handig bij dichte kluiten)</div>
       </div>
       <button class="primary" id="processBtn">Tel dikkopjes</button>
