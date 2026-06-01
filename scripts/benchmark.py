@@ -53,16 +53,21 @@ def _odd(n):
 # and paste the JSON below.
 ADAPTIVE_MODELS = {
     'standard': {
-        'features': ['clump_frac', 'p90_over_median', 'cv_area',
+        # top-5 features; ordered as in the analyze script's correlation rank.
+        'features': ['clump_frac', 'cv_area', 'p90_over_median',
                      'largest_over_median', 'std_area'],
-        'beta': [0.9871590909090912, 0.05514029750591552, -0.03155248531956619,
-                 -0.15186795481977106, 0.12264215874347197, -0.007820168581405126],
-        'mu':   [0.4841286306924158, 4.2325774541524925, 1.4676699521315202,
+        'beta': [0.9972727272727275, 0.05812097426852898, -0.11834816680619258,
+                 -0.007631038594075638, 0.10236213376037359, -0.006802614750998628],
+        'mu':   [0.4841286306924158, 1.4676699521315202, 4.2325774541524925,
                  23.048469732088286, 5153.453733816543],
-        'sd':   [0.059298243352269776, 1.144921537280663, 0.5145865186458295,
+        'sd':   [0.059298243352269776, 0.5145865186458295, 1.144921537280663,
                  19.089374099493547, 6387.049687696688],
     },
     'sensitive': {
+        # top-5 trained against the global-default counting params. Includes
+        # `megapixels` which is what makes high-res photos counted right.
+        # Switching to per-mode counting + top-1 dropped megapixels and
+        # regressed test-files2; see tune_hyperparams analysis.
         'features': ['clump_frac', 'p90_over_median', 'megapixels',
                      'log_megapixels', 'lh_median'],
         'beta': [1.207386363636364, 0.06980702423311459, -0.025454457849815412,
@@ -149,6 +154,16 @@ def scale_params_for_image(base_params, img):
     p.setdefault('bin_dilate_kernel', max(3, int(round(20 * linear_scale))))
     p.setdefault('bin_bright_close_kernel', max(3, int(round(25 * linear_scale))))
     p.setdefault('bin_final_close_kernel', max(3, int(round(30 * linear_scale))))
+
+    # Per-mode counting hyperparameters (overridable). These don't depend on
+    # resolution; they live with scale_params_for_image purely so the per-image
+    # params dict ends up self-contained for downstream blobs_to_count calls.
+    p.setdefault('clump_ratio_threshold', mode.get('clumpRatioThreshold',
+                                                   CLUMP_RATIO_THRESHOLD))
+    p.setdefault('large_clump_ratio', mode.get('largeClumpRatio',
+                                               LARGE_CLUMP_RATIO))
+    p.setdefault('large_clump_overlap', mode.get('largeClumpOverlap',
+                                                 LARGE_CLUMP_OVERLAP))
     return p
 
 # Detection modes (mirror app.js DETECTION_MODES). Keep in sync.
@@ -158,18 +173,29 @@ DETECTION_MODES = {
         'morphClose': True,
         'minBlobArea': 80,
         # Empirical optimum across the combined 88-photo dataset (test-files +
-        # test-files2). See scripts/tune_sa_factor.py for the sweep that
-        # picked this value. Test-files alone prefers 1.01 (essentially
-        # identical), test-files2 alone prefers 0.95.
+        # test-files2). See scripts/tune_sa_factor.py.
         'defaultSaFactor': 0.98,
+        # Counting hyperparameters, jointly tuned per mode by
+        # scripts/tune_hyperparams.py (stage 1, adaptive=off):
+        #   standard:  10.38% -> 9.29% MAPE on combined (-1.09pp).
+        'clumpRatioThreshold': 1.9,
+        'largeClumpRatio': 4.0,
+        'largeClumpOverlap': 1.20,
     },
     'sensitive': {
         'darkThreshold': 50,
         'morphClose': False,
         'minBlobArea': 30,
-        # Empirical optimum across the combined 88-photo dataset. Test-files
-        # alone prefers 1.21, test-files2 alone prefers 1.24.
+        # Empirical optimum across the combined 88-photo dataset.
         'defaultSaFactor': 1.21,
+        # Sensitive sticks with the global defaults. tune_hyperparams.py
+        # found stage-1 winners (1.8 / 8.0 / 1.30), but in combination with
+        # the adaptive regression they regress test-files2 — the lower-
+        # complexity adaptive model (top-1) needed for the new counting
+        # drops `megapixels` and loses the high-res handling.
+        'clumpRatioThreshold': CLUMP_RATIO_THRESHOLD,
+        'largeClumpRatio': LARGE_CLUMP_RATIO,
+        'largeClumpOverlap': LARGE_CLUMP_OVERLAP,
     },
 }
 DEFAULT_DETECTION_MODE = 'sensitive'

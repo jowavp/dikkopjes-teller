@@ -258,11 +258,14 @@ def analyze_mode(mode, emit_coefs=False):
                 new_errs.append(err)
         print(f'  top{k:<4}    {np.mean(old_errs)*100:>9.2f}% {np.mean(new_errs)*100:>9.2f}%')
 
-    # Emit shipping coefficients. We pin k=5: it captures most of the LOOCV
-    # win (-1.11% standard, -2.08% sensitive) with much lower overfitting risk
-    # than the full 13-feature model on n=88. Also halves the JS code surface.
+    # Emit shipping coefficients. Per-mode k chosen by LOOCV with a tiebreaker
+    # favoring simpler models when MAPE differs by <0.2pp from the LOOCV
+    # minimum. Concretely: standard wants top-5 (top-13 gains 0.18pp at 14
+    # params from 88 samples — overfitting risk); sensitive wants top-1
+    # (clump_frac alone, r=+0.58). Forcing uniform k would regress one mode.
+    SHIP_K = {'standard': 5, 'sensitive': 1}
     if emit_coefs:
-        best_k = 5
+        best_k = SHIP_K.get(mode, 5)
         subset, _ = loocv_results[best_k]
         X = np.array([[c['feats'][f] for f in subset] for c in cache])
         beta, mu, sd = fit_linreg(X, y)

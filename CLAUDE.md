@@ -36,7 +36,8 @@ Scripts resolve paths via `__file__` so cwd doesn't matter.
   is the benchmark source of truth — keep them aligned when changing.
 - `DETECTION_MODES` in `app.js` and Python's `DETECTION_MODES` in
   `scripts/benchmark.py` must stay aligned (same threshold/min-area/close
-  flags + `defaultSaFactor`).
+  flags + `defaultSaFactor` + per-mode counting params
+  `clumpRatioThreshold` / `largeClumpRatio` / `largeClumpOverlap`).
 - `ADAPTIVE_MODELS` (regression coefficients for adaptive sa_factor) in
   `app.js` and `scripts/benchmark.py` must stay aligned. Retrain with
   `python scripts/analyze_factor_combined.py --emit-coefs` and paste the
@@ -63,10 +64,10 @@ override via the slider + Process button.
 Per-mode MAPE / within-10% with adaptive factor on the combined 88-photo
 benchmark (in-sample; LOOCV — honest generalization — is ~0.5pp worse):
 
-| mode      | dark thresh | morph close | min area | default sa_factor | MAPE (1 MP / 6 MP) | within-10% (1 MP / 6 MP) |
-|-----------|-------------|-------------|----------|-------------------|--------------------|--------------------------|
-| standard  | 75          | yes (3×3)   | 80       | 0.98              | 8.7% / 8.7%        | 65% / 60%                |
-| sensitive | 50          | no          | 30       | 1.21              | 7.4% / 7.0%        | 70% / 81%                |
+| mode      | dark thresh | morph close | min area | default sa_factor | clump ratios (cr/lcr/lco) | MAPE (1 MP / 6 MP) | within-10% (1 MP / 6 MP) |
+|-----------|-------------|-------------|----------|-------------------|---------------------------|--------------------|--------------------------|
+| standard  | 75          | yes (3×3)   | 80       | 0.98              | 1.9 / 4.0 / 1.20          | 8.2% / 8.5%        | 67% / 62%                |
+| sensitive | 50          | no          | 30       | 1.21              | 1.6 / 6.0 / 1.40          | 7.4% / 7.0%        | 70% / 81%                |
 
 `sensitive` is the default. It wins on aggregate metrics by detecting more
 frogs as separate blobs (so the area-counter has less work). Trade-off: on

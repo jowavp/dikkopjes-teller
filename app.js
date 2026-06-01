@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_VERSION = '0.8.0-adaptive-factor';  // bump on releases
+const APP_VERSION = '0.9.0-joint-tune';  // bump on releases
 document.getElementById('appVersion').textContent = 'v' + APP_VERSION;
 
 // Threshold used for bin/tray detection (finding WHERE the bak is in the photo).
@@ -54,6 +54,11 @@ const DETECTION_MODES = {
     // Empirical optimum across the combined 88-photo dataset (test-files +
     // test-files2). See scripts/tune_sa_factor.py.
     defaultSaFactor: 0.98,
+    // Per-mode counting hyperparameters jointly tuned by tune_hyperparams.py
+    // (stage 1, adaptive=off): standard 10.38% -> 9.29% MAPE.
+    clumpRatioThreshold: 1.9,
+    largeClumpRatio: 4.0,
+    largeClumpOverlap: 1.20,
   },
   sensitive: {
     label: 'Gevoelig',
@@ -62,6 +67,12 @@ const DETECTION_MODES = {
     minBlobArea: 30,
     // Empirical optimum across the combined 88-photo dataset.
     defaultSaFactor: 1.21,
+    // Sensitive sticks with the global defaults. Stage-1 winners regressed
+    // test-files2 when combined with adaptive — keeping the megapixels-aware
+    // top-5 model needs the global counting params.
+    clumpRatioThreshold: CLUMP_RATIO_THRESHOLD,
+    largeClumpRatio: LARGE_CLUMP_RATIO,
+    largeClumpOverlap: LARGE_CLUMP_OVERLAP,
   },
 };
 const DEFAULT_DETECTION_MODE = 'sensitive';
@@ -78,16 +89,21 @@ const DEFAULT_DETECTION_MODE = 'sensitive';
 // Keep ADAPTIVE_MODELS in app.js and scripts/benchmark.py in sync.
 const ADAPTIVE_MODELS = {
   standard: {
-    features: ['clump_frac', 'p90_over_median', 'cv_area',
+    // top-5 (correlation-ranked). Retrained on the per-mode tuned counting
+    // params from tune_hyperparams.py.
+    features: ['clump_frac', 'cv_area', 'p90_over_median',
                'largest_over_median', 'std_area'],
-    beta: [0.9871590909090912, 0.05514029750591552, -0.03155248531956619,
-           -0.15186795481977106, 0.12264215874347197, -0.007820168581405126],
-    mu:   [0.4841286306924158, 4.2325774541524925, 1.4676699521315202,
+    beta: [0.9972727272727275, 0.05812097426852898, -0.11834816680619258,
+           -0.007631038594075638, 0.10236213376037359, -0.006802614750998628],
+    mu:   [0.4841286306924158, 1.4676699521315202, 4.2325774541524925,
            23.048469732088286, 5153.453733816543],
-    sd:   [0.059298243352269776, 1.144921537280663, 0.5145865186458295,
+    sd:   [0.059298243352269776, 0.5145865186458295, 1.144921537280663,
            19.089374099493547, 6387.049687696688],
   },
   sensitive: {
+    // top-5 trained on global-default counting params; uses `megapixels`
+    // which is essential for high-res photos. Stage-1 counting tune +
+    // top-1 (without megapixels) regressed test-files2.
     features: ['clump_frac', 'p90_over_median', 'megapixels',
                'log_megapixels', 'lh_median'],
     beta: [1.207386363636364, 0.06980702423311459, -0.025454457849815412,
@@ -371,17 +387,21 @@ function detectBlobs(img) {
 /**
  * Vertaal blobs naar tellingen + detections aan de hand van saFactor (puur JS, geen OpenCV).
  */
-function blobsToDetections(blobs, saFactor, minSingleArea = MIN_SINGLE_AREA) {
+function blobsToDetections(blobs, saFactor, minSingleArea = MIN_SINGLE_AREA, mode = null) {
   if (blobs.length === 0) return { detections: [], total: 0 };
+  const cfg = DETECTION_MODES[mode || getDetectionMode()];
+  const clumpRatio = cfg.clumpRatioThreshold ?? CLUMP_RATIO_THRESHOLD;
+  const largeClumpRatio = cfg.largeClumpRatio ?? LARGE_CLUMP_RATIO;
+  const largeClumpOverlap = cfg.largeClumpOverlap ?? LARGE_CLUMP_OVERLAP;
   const singleArea = estimateSingleArea(blobs.map(b => b.area), saFactor, minSingleArea);
   const detections = [];
   let total = 0;
   for (const b of blobs) {
     const ratio = b.area / singleArea;
     let count;
-    if (ratio < CLUMP_RATIO_THRESHOLD) count = 1;
-    else if (ratio < LARGE_CLUMP_RATIO) count = Math.round(ratio);
-    else count = Math.round(b.area / (singleArea * LARGE_CLUMP_OVERLAP));
+    if (ratio < clumpRatio) count = 1;
+    else if (ratio < largeClumpRatio) count = Math.round(ratio);
+    else count = Math.round(b.area / (singleArea * largeClumpOverlap));
     detections.push({ cx: b.cx, cy: b.cy, count });
     total += count;
   }
