@@ -41,6 +41,90 @@ def _odd(n):
     return n if n % 2 == 1 else n + 1
 
 
+# Per-photo adaptive sa_factor models, fit by scripts/analyze_factor_combined.py
+# on the combined 88-photo dataset (test-files + test-files2). Top-5 features
+# per mode, standardized linear regression.
+#
+# LOOCV improvement vs fixed defaultSaFactor:
+#   standard:   10.38% MAPE -> 9.27%  (-1.11pp)
+#   sensitive:   9.76% MAPE -> 7.68%  (-2.08pp)
+#
+# To retrain: run `python scripts/analyze_factor_combined.py --emit-coefs`
+# and paste the JSON below.
+ADAPTIVE_MODELS = {
+    'standard': {
+        'features': ['clump_frac', 'p90_over_median', 'cv_area',
+                     'largest_over_median', 'std_area'],
+        'beta': [0.9871590909090912, 0.05514029750591552, -0.03155248531956619,
+                 -0.15186795481977106, 0.12264215874347197, -0.007820168581405126],
+        'mu':   [0.4841286306924158, 4.2325774541524925, 1.4676699521315202,
+                 23.048469732088286, 5153.453733816543],
+        'sd':   [0.059298243352269776, 1.144921537280663, 0.5145865186458295,
+                 19.089374099493547, 6387.049687696688],
+    },
+    'sensitive': {
+        'features': ['clump_frac', 'p90_over_median', 'megapixels',
+                     'log_megapixels', 'lh_median'],
+        'beta': [1.207386363636364, 0.06980702423311459, -0.025454457849815412,
+                 0.07427144671852026, 0.061528563365571096, -0.11766815376801248],
+        'mu':   [0.5049657749628903, 2.8431283330512835, 3.2164198295454542,
+                 0.8708257852456737, 656.7954545454545],
+        'sd':   [0.07460489624099871, 0.5115009115089713, 2.252918576915454,
+                 0.7957601720118731, 513.0545372191508],
+    },
+}
+ADAPTIVE_FACTOR_MIN = 0.70
+ADAPTIVE_FACTOR_MAX = 1.40
+
+
+def compute_blob_features(blobs, img_shape):
+    """Per-photo features for adaptive sa_factor prediction.
+
+    Must stay in sync with the equivalent function in app.js (computeFeatures)
+    and with features_from_blobs() in scripts/analyze_factor_combined.py.
+    """
+    if not blobs:
+        return None
+    areas = np.asarray([b['area'] for b in blobs], dtype=np.float64)
+    n = len(areas)
+    sorted_a = np.sort(areas)
+    median = float(np.median(areas))
+    half = sorted_a[: max(3, n // 2)]
+    lh_median = float(np.median(half))
+    largest = float(sorted_a[-1])
+    p90 = float(sorted_a[int(0.9 * (n - 1))])
+    h, w = img_shape[:2]
+    mp = (h * w) / 1_000_000.0
+    mean_area = float(areas.mean())
+    return {
+        'num_blobs': n,
+        'median_area': median,
+        'lh_median': lh_median,
+        'mean_area': mean_area,
+        'std_area': float(areas.std()),
+        'cv_area': float(areas.std() / mean_area) if mean_area > 0 else 0.0,
+        'total_dark': float(areas.sum()),
+        'clump_frac': float(np.mean(areas > 1.5 * lh_median)),
+        'p90_over_median': p90 / median if median > 0 else 0.0,
+        'largest_over_median': largest / median if median > 0 else 0.0,
+        'log_density': float(np.log(n / max(1.0, areas.sum()))) if areas.sum() > 0 else 0.0,
+        'megapixels': mp,
+        'log_megapixels': float(np.log(max(mp, 0.01))),
+    }
+
+
+def predict_adaptive_factor(blobs, img_shape, mode):
+    """Predicted sa_factor for this photo + mode, clipped to safe range."""
+    if not blobs or mode not in ADAPTIVE_MODELS:
+        return DETECTION_MODES.get(mode, {}).get('defaultSaFactor', DEFAULT_SA_FACTOR)
+    m = ADAPTIVE_MODELS[mode]
+    feats = compute_blob_features(blobs, img_shape)
+    x = np.array([feats[f] for f in m['features']])
+    xn = (x - np.array(m['mu'])) / np.array(m['sd'])
+    z = m['beta'][0] + float(np.dot(m['beta'][1:], xn))
+    return max(ADAPTIVE_FACTOR_MIN, min(ADAPTIVE_FACTOR_MAX, z))
+
+
 def scale_params_for_image(base_params, img):
     """Augment params with resolution-scaled overrides based on image size.
 
@@ -585,6 +669,9 @@ def main():
                              'tadpole radius')
     parser.add_argument('--single-area', type=float, default=None,
                         help='For --algo area: override estimated single area with a fixed value')
+    parser.add_argument('--adaptive', choices=['on', 'off'], default='on',
+                        help='on (default): predict sa_factor per photo from blob features. '
+                             'off: use the mode default. Forced off if --sa-factor is given.')
     args = parser.parse_args()
 
     estimators = {
@@ -602,8 +689,13 @@ def main():
         'watershed_method': args.watershed_method,
         'open_ratio': args.open_ratio,
     }
-    # If user didn't override sa_factor, use the mode's default
-    if args.sa_factor == DEFAULT_SA_FACTOR:
+    # User-given --sa-factor wins over adaptive prediction.
+    user_overrode_factor = args.sa_factor != DEFAULT_SA_FACTOR
+    if user_overrode_factor:
+        adaptive_enabled = False
+    else:
+        adaptive_enabled = args.adaptive == 'on'
+        # Fallback when adaptive is off and user gave no factor: use mode default.
         args.sa_factor = DETECTION_MODES[args.detection]['defaultSaFactor']
     if args.algo == 'area':
         params['counter'] = 'area'
@@ -620,7 +712,8 @@ def main():
             if r.get('image_path'):
                 rows.append(r)
 
-    print(f"Running algorithm on {len(rows)} images (sa_factor={args.sa_factor})\n")
+    factor_label = 'adaptive (per-photo)' if adaptive_enabled else f'{args.sa_factor:.2f}'
+    print(f"Running algorithm on {len(rows)} images (sa_factor={factor_label})\n")
     print(f"{'image':<40} {'truth':>6} {'pred':>6} {'diff':>6} {'best_f':>7} {'best_pred':>10}")
     print('-' * 80)
 
@@ -640,12 +733,16 @@ def main():
         scaled_params = scale_params_for_image(params, img)
         if args.algo == 'watershed':
             blobs, _, labels_mat = detect_blobs_full(img, scaled_params)
+            effective_factor = (predict_adaptive_factor(blobs, img.shape, args.detection)
+                                if adaptive_enabled else args.sa_factor)
             total, _, single_area = blobs_to_count_watershed(blobs, labels_mat,
-                                                             args.sa_factor, scaled_params)
+                                                             effective_factor, scaled_params)
             best = best_sa_factor_for_watershed(blobs, labels_mat, truth, scaled_params)
         else:
             blobs, _ = detect_blobs(img, scaled_params)
-            total, _, single_area = blobs_to_count(blobs, args.sa_factor, scaled_params)
+            effective_factor = (predict_adaptive_factor(blobs, img.shape, args.detection)
+                                if adaptive_enabled else args.sa_factor)
+            total, _, single_area = blobs_to_count(blobs, effective_factor, scaled_params)
             best = best_sa_factor_for(blobs, truth, scaled_params)
         diff = total - truth
         abs_errors.append(abs(diff))

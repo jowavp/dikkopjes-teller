@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_VERSION = '0.7.1-tuned-defaults';  // bump on releases
+const APP_VERSION = '0.8.0-adaptive-factor';  // bump on releases
 document.getElementById('appVersion').textContent = 'v' + APP_VERSION;
 
 // Threshold used for bin/tray detection (finding WHERE the bak is in the photo).
@@ -66,6 +66,41 @@ const DETECTION_MODES = {
 };
 const DEFAULT_DETECTION_MODE = 'sensitive';
 
+// Per-photo adaptive sa_factor models, fit by scripts/analyze_factor_combined.py
+// on the combined 88-photo dataset (test-files + test-files2). Top-5 features
+// per mode, standardized linear regression.
+//
+// LOOCV improvement vs fixed defaultSaFactor:
+//   standard:   10.38% MAPE -> 9.27%  (-1.11pp)
+//   sensitive:   9.76% MAPE -> 7.68%  (-2.08pp)
+//
+// Coefficients are emitted by `python scripts/analyze_factor_combined.py --emit-coefs`.
+// Keep ADAPTIVE_MODELS in app.js and scripts/benchmark.py in sync.
+const ADAPTIVE_MODELS = {
+  standard: {
+    features: ['clump_frac', 'p90_over_median', 'cv_area',
+               'largest_over_median', 'std_area'],
+    beta: [0.9871590909090912, 0.05514029750591552, -0.03155248531956619,
+           -0.15186795481977106, 0.12264215874347197, -0.007820168581405126],
+    mu:   [0.4841286306924158, 4.2325774541524925, 1.4676699521315202,
+           23.048469732088286, 5153.453733816543],
+    sd:   [0.059298243352269776, 1.144921537280663, 0.5145865186458295,
+           19.089374099493547, 6387.049687696688],
+  },
+  sensitive: {
+    features: ['clump_frac', 'p90_over_median', 'megapixels',
+               'log_megapixels', 'lh_median'],
+    beta: [1.207386363636364, 0.06980702423311459, -0.025454457849815412,
+           0.07427144671852026, 0.061528563365571096, -0.11766815376801248],
+    mu:   [0.5049657749628903, 2.8431283330512835, 3.2164198295454542,
+           0.8708257852456737, 656.7954545454545],
+    sd:   [0.07460489624099871, 0.5115009115089713, 2.252918576915454,
+           0.7957601720118731, 513.0545372191508],
+  },
+};
+const ADAPTIVE_FACTOR_MIN = 0.70;
+const ADAPTIVE_FACTOR_MAX = 1.40;
+
 function getDetectionMode() {
   const m = localStorage.getItem('detectionMode');
   return (m && DETECTION_MODES[m]) ? m : DEFAULT_DETECTION_MODE;
@@ -74,6 +109,11 @@ function getDetectionMode() {
 let cvReady = false;
 let currentImage = null;
 let lastResult = null;  // {total, saFactor, image, blobs, stats} - gevuld door processImage()
+// false = use adaptive predicted sa_factor (default). Set to true when the
+// user explicitly clicks the Process button — they've tweaked the slider and
+// want their value used. Reset on photo upload or mode change so the new
+// context gets a fresh adaptive prediction.
+let manualSaFactorOverride = false;
 
 const $ = id => document.getElementById(id);
 const status = $('status');
@@ -143,6 +183,8 @@ function loadImage(file) {
     const img = new Image();
     img.onload = () => {
       currentImage = img;
+      // Fresh photo → let the adaptive model pick a starting sa_factor.
+      manualSaFactorOverride = false;
       controls.classList.remove('hidden');
       uploadZone.querySelector('p strong').textContent = '✓ ' + file.name;
       status.innerHTML = 'Klaar om te tellen';
@@ -158,7 +200,11 @@ saFactorInput.addEventListener('input', () => {
   saFactorValue.textContent = parseFloat(saFactorInput.value).toFixed(2);
 });
 
-processBtn.addEventListener('click', processImage);
+// Process button = "use my slider value" — respect the user's tweak.
+processBtn.addEventListener('click', () => {
+  manualSaFactorOverride = true;
+  processImage();
+});
 
 // --- Detection mode (persists in localStorage) ---
 function applyDetectionMode(mode, opts = {}) {
@@ -176,6 +222,8 @@ applyDetectionMode(getDetectionMode());
 
 detectionModeSelect?.addEventListener('change', () => {
   applyDetectionMode(detectionModeSelect.value);
+  // Mode change → adaptive prediction depends on mode, so re-predict.
+  manualSaFactorOverride = false;
   if (currentImage && cvReady) processImage();
 });
 
@@ -205,9 +253,20 @@ async function processImage() {
   await new Promise(r => setTimeout(r, 50));
 
   try {
-    const saFactor = parseFloat(saFactorInput.value);
     // Detect blobs once (heavy), then convert to detections (cheap)
     const { blobs, srcRgb, minSingleArea } = detectBlobs(currentImage);
+    // Pick the sa_factor: adaptive prediction unless the user explicitly
+    // tweaked the slider and clicked Process for this photo.
+    let saFactor;
+    if (manualSaFactorOverride) {
+      saFactor = parseFloat(saFactorInput.value);
+    } else {
+      saFactor = predictAdaptiveFactor(
+        blobs, currentImage.naturalWidth, currentImage.naturalHeight, getDetectionMode()
+      );
+      saFactorInput.value = saFactor.toFixed(2);
+      saFactorValue.textContent = saFactor.toFixed(2);
+    }
     const { detections, total } = blobsToDetections(blobs, saFactor, minSingleArea);
     // Bereken samenvattende stats voor analytics
     const stats = computeBlobStats(blobs, detections, saFactor, minSingleArea);
@@ -518,6 +577,58 @@ function findBinMask(blurred, linearScale = 1.0) {
   return mask;
 }
 
+/**
+ * Per-photo features used by the adaptive sa_factor regression.
+ * Must stay in sync with compute_blob_features() in scripts/benchmark.py
+ * and features_from_blobs() in scripts/analyze_factor_combined.py.
+ */
+function computeBlobFeatures(blobs, imageWidth, imageHeight) {
+  if (blobs.length === 0) return null;
+  const areas = blobs.map(b => b.area);
+  const n = areas.length;
+  const sorted = [...areas].sort((a, b) => a - b);
+  const median = sorted[Math.floor(sorted.length / 2)];  // matches numpy.median for odd; tolerable approx for even
+  const halfLen = Math.max(3, Math.floor(n / 2));
+  const half = sorted.slice(0, halfLen);
+  const lhMedian = half[Math.floor(half.length / 2)];
+  const largest = sorted[sorted.length - 1];
+  const p90 = sorted[Math.floor(0.9 * (n - 1))];
+  const mp = (imageWidth * imageHeight) / 1_000_000;
+  const sum = areas.reduce((a, b) => a + b, 0);
+  const mean = sum / n;
+  const variance = areas.reduce((acc, a) => acc + (a - mean) ** 2, 0) / n;
+  const std = Math.sqrt(variance);
+  return {
+    num_blobs: n,
+    median_area: median,
+    lh_median: lhMedian,
+    mean_area: mean,
+    std_area: std,
+    cv_area: mean > 0 ? std / mean : 0,
+    total_dark: sum,
+    clump_frac: areas.filter(a => a > 1.5 * lhMedian).length / n,
+    p90_over_median: median > 0 ? p90 / median : 0,
+    largest_over_median: median > 0 ? largest / median : 0,
+    log_density: sum > 0 ? Math.log(n / Math.max(1, sum)) : 0,
+    megapixels: mp,
+    log_megapixels: Math.log(Math.max(mp, 0.01)),
+  };
+}
+
+function predictAdaptiveFactor(blobs, imageWidth, imageHeight, mode) {
+  const fallback = (DETECTION_MODES[mode] || {}).defaultSaFactor ?? 1.0;
+  if (blobs.length === 0) return fallback;
+  const m = ADAPTIVE_MODELS[mode];
+  if (!m) return fallback;
+  const feats = computeBlobFeatures(blobs, imageWidth, imageHeight);
+  let z = m.beta[0];
+  for (let i = 0; i < m.features.length; i++) {
+    const x = feats[m.features[i]];
+    z += m.beta[i + 1] * ((x - m.mu[i]) / m.sd[i]);
+  }
+  return Math.max(ADAPTIVE_FACTOR_MIN, Math.min(ADAPTIVE_FACTOR_MAX, z));
+}
+
 function estimateSingleArea(areas, saFactor, minSingleArea = MIN_SINGLE_AREA) {
   // Lower-half median: take the median of the smallest 50% of blob areas.
   // Singles dominate the lower half of the area distribution; clumps inflate
@@ -689,7 +800,8 @@ applyCalibBtn?.addEventListener('click', () => {
   saFactorInput.value = factor.toFixed(2);
   saFactorValue.textContent = factor.toFixed(2);
   autoCalibSuggestion.classList.add('hidden');
-  // Herbereken
+  // User accepted a specific factor → respect it instead of adaptive.
+  manualSaFactorOverride = true;
   processImage();
 });
 
