@@ -28,6 +28,45 @@ LARGE_CLUMP_RATIO = 6.0
 LARGE_CLUMP_OVERLAP = 1.4
 DEFAULT_SA_FACTOR = 0.97
 
+# Resolution-aware scaling. Pixel constants above were calibrated on photos
+# in test-files/, which span 0.76 to 1.23 MP. Higher-res photos need them
+# scaled — areas linearly with pixel count, kernel/blur sizes with sqrt.
+# Reference is set to the top of the calibration range so all calibration
+# photos clamp to scale=1.0 (= original behavior preserved exactly).
+REFERENCE_PIXELS = 1_250_000
+
+
+def _odd(n):
+    n = max(1, int(round(n)))
+    return n if n % 2 == 1 else n + 1
+
+
+def scale_params_for_image(base_params, img):
+    """Augment params with resolution-scaled overrides based on image size.
+
+    Modeled after the area constants being absolute pixel counts: a 6 MP photo
+    has tadpoles that are ~6× larger in pixel area than the same scene at
+    1 MP. Kernel/blur sizes are linear, so they scale by sqrt.
+    """
+    p = dict(base_params)
+    h, w = img.shape[:2]
+    area_scale = max(1.0, (h * w) / REFERENCE_PIXELS)
+    linear_scale = area_scale ** 0.5
+
+    mode_name = p.get('detection_mode', DEFAULT_DETECTION_MODE)
+    mode = DETECTION_MODES[mode_name]
+
+    p.setdefault('area_scale', area_scale)
+    p.setdefault('linear_scale', linear_scale)
+    p.setdefault('min_blob_area', max(3, int(round(mode['minBlobArea'] * area_scale))))
+    p.setdefault('min_single_area', MIN_SINGLE_AREA * area_scale)
+    p.setdefault('density_blur', _odd(DENSITY_BLUR * linear_scale))
+    p.setdefault('close_kernel', max(3, int(round(3 * linear_scale))))
+    p.setdefault('bin_dilate_kernel', max(3, int(round(20 * linear_scale))))
+    p.setdefault('bin_bright_close_kernel', max(3, int(round(25 * linear_scale))))
+    p.setdefault('bin_final_close_kernel', max(3, int(round(30 * linear_scale))))
+    return p
+
 # Detection modes (mirror app.js DETECTION_MODES). Keep in sync.
 DETECTION_MODES = {
     'standard': {
@@ -50,8 +89,11 @@ def find_bin_mask(blurred, params=None):
     p = params or {}
     dark_thr = p.get('dark_threshold', DARK_THRESHOLD)
     bright_thr = p.get('bin_bright_threshold', BIN_BRIGHT_THRESHOLD)
-    density_blur = p.get('density_blur', DENSITY_BLUR)
+    density_blur = _odd(p.get('density_blur', DENSITY_BLUR))
     density_thr = p.get('density_threshold', DENSITY_THRESHOLD)
+    k_dilate = int(p.get('bin_dilate_kernel', 20))
+    k_bright = int(p.get('bin_bright_close_kernel', 25))
+    k_final = int(p.get('bin_final_close_kernel', 30))
 
     _, dark = cv2.threshold(blurred, dark_thr, 255, cv2.THRESH_BINARY_INV)
     density = cv2.GaussianBlur(dark, (density_blur, density_blur), 0)
@@ -77,33 +119,35 @@ def find_bin_mask(blurred, params=None):
     hull = cv2.convexHull(pts)
     mask = np.zeros(blurred.shape, dtype=np.uint8)
     cv2.drawContours(mask, [hull], -1, 255, -1)
-    mask = cv2.dilate(mask, np.ones((20, 20), np.uint8))
+    mask = cv2.dilate(mask, np.ones((k_dilate, k_dilate), np.uint8))
 
     _, bright = cv2.threshold(blurred, bright_thr, 255, cv2.THRESH_BINARY)
-    k25 = np.ones((25, 25), np.uint8)
+    k_bright_kernel = np.ones((k_bright, k_bright), np.uint8)
     for _ in range(3):
-        bright = cv2.morphologyEx(bright, cv2.MORPH_CLOSE, k25)
+        bright = cv2.morphologyEx(bright, cv2.MORPH_CLOSE, k_bright_kernel)
     mask = cv2.bitwise_and(mask, bright)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((30, 30), np.uint8))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((k_final, k_final), np.uint8))
     return mask
 
 
 def detect_blobs(img_bgr, params=None):
-    p = params or {}
+    p = scale_params_for_image(params or {}, img_bgr)
     mode_name = p.get('detection_mode', DEFAULT_DETECTION_MODE)
     mode = DETECTION_MODES[mode_name]
     dark_thr = p.get('dark_threshold', mode['darkThreshold'])
-    min_blob_area = p.get('min_blob_area', mode['minBlobArea'])
+    min_blob_area = p['min_blob_area']
     morph_close = p.get('morph_close', mode['morphClose'])
+    k_close = int(p.get('close_kernel', 3))
 
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    bin_mask = find_bin_mask(blurred, params)
+    bin_mask = find_bin_mask(blurred, p)
 
     _, dark = cv2.threshold(blurred, dark_thr, 255, cv2.THRESH_BINARY_INV)
     dark = cv2.bitwise_and(dark, bin_mask)
     if morph_close:
-        dark = cv2.morphologyEx(dark, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+        dark = cv2.morphologyEx(dark, cv2.MORPH_CLOSE,
+                                np.ones((k_close, k_close), np.uint8))
 
     num, labels, stats, centroids = cv2.connectedComponentsWithStats(dark, connectivity=8)
     blobs = []
@@ -126,21 +170,23 @@ def detect_blobs_full(img_bgr, params=None):
     Backward-compat wrapper around detect_blobs would have meant changing
     every caller of detect_blobs; this parallel function is cheaper.
     """
-    p = params or {}
+    p = scale_params_for_image(params or {}, img_bgr)
     mode_name = p.get('detection_mode', DEFAULT_DETECTION_MODE)
     mode = DETECTION_MODES[mode_name]
     dark_thr = p.get('dark_threshold', mode['darkThreshold'])
-    min_blob_area = p.get('min_blob_area', mode['minBlobArea'])
+    min_blob_area = p['min_blob_area']
     morph_close = p.get('morph_close', mode['morphClose'])
+    k_close = int(p.get('close_kernel', 3))
 
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    bin_mask = find_bin_mask(blurred, params)
+    bin_mask = find_bin_mask(blurred, p)
 
     _, dark = cv2.threshold(blurred, dark_thr, 255, cv2.THRESH_BINARY_INV)
     dark = cv2.bitwise_and(dark, bin_mask)
     if morph_close:
-        dark = cv2.morphologyEx(dark, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+        dark = cv2.morphologyEx(dark, cv2.MORPH_CLOSE,
+                                np.ones((k_close, k_close), np.uint8))
 
     num, labels, stats, centroids = cv2.connectedComponentsWithStats(dark, connectivity=8)
     blobs = []
@@ -582,15 +628,19 @@ def main():
         if img is None:
             print(f"  !! kon foto niet lezen: {path}")
             continue
+        # Scale pixel constants to this image's resolution. Detection functions
+        # also scale internally (idempotent via setdefault), but the estimator's
+        # min_single_area floor lives in blobs_to_count and needs scaled params.
+        scaled_params = scale_params_for_image(params, img)
         if args.algo == 'watershed':
-            blobs, _, labels_mat = detect_blobs_full(img, params)
+            blobs, _, labels_mat = detect_blobs_full(img, scaled_params)
             total, _, single_area = blobs_to_count_watershed(blobs, labels_mat,
-                                                             args.sa_factor, params)
-            best = best_sa_factor_for_watershed(blobs, labels_mat, truth, params)
+                                                             args.sa_factor, scaled_params)
+            best = best_sa_factor_for_watershed(blobs, labels_mat, truth, scaled_params)
         else:
-            blobs, _ = detect_blobs(img, params)
-            total, _, single_area = blobs_to_count(blobs, args.sa_factor, params)
-            best = best_sa_factor_for(blobs, truth, params)
+            blobs, _ = detect_blobs(img, scaled_params)
+            total, _, single_area = blobs_to_count(blobs, args.sa_factor, scaled_params)
+            best = best_sa_factor_for(blobs, truth, scaled_params)
         diff = total - truth
         abs_errors.append(abs(diff))
         rel_errors.append(abs(diff) / truth if truth > 0 else 0)

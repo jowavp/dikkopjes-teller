@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_VERSION = '0.6.0-detection-modes';  // bump on releases
+const APP_VERSION = '0.7.0-resolution-scaling';  // bump on releases
 document.getElementById('appVersion').textContent = 'v' + APP_VERSION;
 
 // Threshold used for bin/tray detection (finding WHERE the bak is in the photo).
@@ -14,6 +14,23 @@ const MIN_SINGLE_AREA = 150.0;
 const CLUMP_RATIO_THRESHOLD = 1.6;
 const LARGE_CLUMP_RATIO = 6.0;
 const LARGE_CLUMP_OVERLAP = 1.4;
+
+// Resolution-aware scaling. The pixel constants above were calibrated on
+// photos spanning 0.76–1.23 MP (test-files/). Higher-res photos need them
+// scaled — areas linearly with pixel count, kernel/blur sizes with sqrt.
+// Reference is the top of the calibration range so all calibration photos
+// clamp to scale=1.0 (original behavior preserved exactly).
+const REFERENCE_PIXELS = 1_250_000;
+
+function computeResolutionScale(width, height) {
+  const areaScale = Math.max(1.0, (width * height) / REFERENCE_PIXELS);
+  return { areaScale, linearScale: Math.sqrt(areaScale) };
+}
+
+function oddKernel(n) {
+  const r = Math.max(1, Math.round(n));
+  return r % 2 === 1 ? r : r + 1;
+}
 
 /**
  * Tadpole detection modes. Choose how aggressively we binarize the in-bin
@@ -187,10 +204,10 @@ async function processImage() {
   try {
     const saFactor = parseFloat(saFactorInput.value);
     // Detect blobs once (heavy), then convert to detections (cheap)
-    const { blobs, srcRgb } = detectBlobs(currentImage);
-    const { detections, total } = blobsToDetections(blobs, saFactor);
+    const { blobs, srcRgb, minSingleArea } = detectBlobs(currentImage);
+    const { detections, total } = blobsToDetections(blobs, saFactor, minSingleArea);
     // Bereken samenvattende stats voor analytics
-    const stats = computeBlobStats(blobs, detections, saFactor);
+    const stats = computeBlobStats(blobs, detections, saFactor, minSingleArea);
     // Render with annotations
     const canvas = renderResult(srcRgb, detections, total);
     const dest = resultCanvas;
@@ -200,7 +217,7 @@ async function processImage() {
     resultCount.textContent = `🐸 ${total} dikkopjes geteld`;
     // Bewaar laatste resultaat (incl. blobs voor snelle hercalibratie + stats voor analytics)
     lastResult = {
-      total, saFactor, image: currentImage, blobs, stats,
+      total, saFactor, image: currentImage, blobs, stats, minSingleArea,
       imageWidth: currentImage.naturalWidth,
       imageHeight: currentImage.naturalHeight,
     };
@@ -237,6 +254,12 @@ downloadBtn.addEventListener('click', () => {
  */
 function detectBlobs(img) {
   const cfg = DETECTION_MODES[getDetectionMode()];
+  const { areaScale, linearScale } = computeResolutionScale(
+    img.naturalWidth, img.naturalHeight
+  );
+  const minBlobArea = Math.max(3, Math.round(cfg.minBlobArea * areaScale));
+  const closeK = Math.max(3, Math.round(3 * linearScale));
+  const minSingleArea = MIN_SINGLE_AREA * areaScale;
 
   const srcCanvas = document.createElement('canvas');
   srcCanvas.width = img.naturalWidth;
@@ -249,13 +272,13 @@ function detectBlobs(img) {
   const blurred = new cv.Mat();
   cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0);
 
-  const binMask = findBinMask(blurred);
+  const binMask = findBinMask(blurred, linearScale);
 
   const dark = new cv.Mat();
   cv.threshold(blurred, dark, cfg.darkThreshold, 255, cv.THRESH_BINARY_INV);
   cv.bitwise_and(dark, binMask, dark);
   if (cfg.morphClose) {
-    const closeKernel = cv.Mat.ones(3, 3, cv.CV_8U);
+    const closeKernel = cv.Mat.ones(closeK, closeK, cv.CV_8U);
     cv.morphologyEx(dark, dark, cv.MORPH_CLOSE, closeKernel);
     closeKernel.delete();
   }
@@ -268,7 +291,7 @@ function detectBlobs(img) {
   const blobs = [];
   for (let i = 1; i < numLabels; i++) {
     const area = stats.intAt(i, cv.CC_STAT_AREA);
-    if (area < cfg.minBlobArea) continue;
+    if (area < minBlobArea) continue;
     const cx = Math.round(centroids.doubleAt(i, 0));
     const cy = Math.round(centroids.doubleAt(i, 1));
     blobs.push({ area, cx, cy });
@@ -280,15 +303,15 @@ function detectBlobs(img) {
 
   src.delete(); gray.delete(); blurred.delete(); binMask.delete();
   dark.delete(); labels.delete(); stats.delete(); centroids.delete();
-  return { blobs, srcRgb };
+  return { blobs, srcRgb, minSingleArea };
 }
 
 /**
  * Vertaal blobs naar tellingen + detections aan de hand van saFactor (puur JS, geen OpenCV).
  */
-function blobsToDetections(blobs, saFactor) {
+function blobsToDetections(blobs, saFactor, minSingleArea = MIN_SINGLE_AREA) {
   if (blobs.length === 0) return { detections: [], total: 0 };
-  const singleArea = estimateSingleArea(blobs.map(b => b.area), saFactor);
+  const singleArea = estimateSingleArea(blobs.map(b => b.area), saFactor, minSingleArea);
   const detections = [];
   let total = 0;
   for (const b of blobs) {
@@ -312,7 +335,7 @@ function blobsToDetections(blobs, saFactor) {
  *   num_medium_clumps: detecties met count 6..15
  *   num_large_clumps : detecties met count 16+
  */
-function computeBlobStats(blobs, detections, saFactor) {
+function computeBlobStats(blobs, detections, saFactor, minSingleArea = MIN_SINGLE_AREA) {
   const stats = {
     num_blobs: blobs.length,
     num_singles: 0,
@@ -327,7 +350,7 @@ function computeBlobStats(blobs, detections, saFactor) {
   if (blobs.length === 0) return stats;
 
   stats.single_area_estimate = Math.round(
-    estimateSingleArea(blobs.map(b => b.area), saFactor)
+    estimateSingleArea(blobs.map(b => b.area), saFactor, minSingleArea)
   );
   for (const b of blobs) {
     stats.total_dark_area += b.area;
@@ -381,20 +404,25 @@ function renderResult(srcRgb, detections, total) {
 }
 
 function countTadpoles(img, saFactor) {
-  const { blobs, srcRgb } = detectBlobs(img);
-  const { detections, total } = blobsToDetections(blobs, saFactor);
+  const { blobs, srcRgb, minSingleArea } = detectBlobs(img);
+  const { detections, total } = blobsToDetections(blobs, saFactor, minSingleArea);
   const canvas = renderResult(srcRgb, detections, total);
   return { canvas, total };
 }
 
-function findBinMask(blurred) {
+function findBinMask(blurred, linearScale = 1.0) {
+  const densityBlur = oddKernel(DENSITY_BLUR * linearScale);
+  const kDilate = Math.max(3, Math.round(20 * linearScale));
+  const kBright = Math.max(3, Math.round(25 * linearScale));
+  const kFinal = Math.max(3, Math.round(30 * linearScale));
+
   // 1. Dark pixels — uses BIN_DARK_THRESHOLD (independent of tadpole detection mode)
   const dark = new cv.Mat();
   cv.threshold(blurred, dark, BIN_DARK_THRESHOLD, 255, cv.THRESH_BINARY_INV);
 
   // 2. Heavy blur = density map
   const density = new cv.Mat();
-  cv.GaussianBlur(dark, density, new cv.Size(DENSITY_BLUR, DENSITY_BLUR), 0);
+  cv.GaussianBlur(dark, density, new cv.Size(densityBlur, densityBlur), 0);
   const dense = new cv.Mat();
   cv.threshold(density, dense, DENSITY_THRESHOLD, 255, cv.THRESH_BINARY);
 
@@ -452,26 +480,26 @@ function findBinMask(blurred) {
       cv.drawContours(mask, hullVec, -1, new cv.Scalar(255), -1);
 
       // Dilate slightly
-      const k20 = cv.Mat.ones(20, 20, cv.CV_8U);
-      cv.dilate(mask, mask, k20);
-      k20.delete();
+      const kDilateMat = cv.Mat.ones(kDilate, kDilate, cv.CV_8U);
+      cv.dilate(mask, mask, kDilateMat);
+      kDilateMat.delete();
 
       // Combine with bright zones
       const bright = new cv.Mat();
       cv.threshold(blurred, bright, BIN_BRIGHT_THRESHOLD, 255, cv.THRESH_BINARY);
-      const k25 = cv.Mat.ones(25, 25, cv.CV_8U);
+      const kBrightMat = cv.Mat.ones(kBright, kBright, cv.CV_8U);
       // Python had iterations=3; OpenCV.js's iteration arg is unreliable across builds, so loop:
       for (let i = 0; i < 3; i++) {
-        cv.morphologyEx(bright, bright, cv.MORPH_CLOSE, k25);
+        cv.morphologyEx(bright, bright, cv.MORPH_CLOSE, kBrightMat);
       }
       cv.bitwise_and(mask, bright, mask);
       bright.delete();
-      k25.delete();
+      kBrightMat.delete();
 
       // Close gaps
-      const k30 = cv.Mat.ones(30, 30, cv.CV_8U);
-      cv.morphologyEx(mask, mask, cv.MORPH_CLOSE, k30);
-      k30.delete();
+      const kFinalMat = cv.Mat.ones(kFinal, kFinal, cv.CV_8U);
+      cv.morphologyEx(mask, mask, cv.MORPH_CLOSE, kFinalMat);
+      kFinalMat.delete();
 
       ptsMat.delete();
       hull.delete();
@@ -487,7 +515,7 @@ function findBinMask(blurred) {
   return mask;
 }
 
-function estimateSingleArea(areas, saFactor) {
+function estimateSingleArea(areas, saFactor, minSingleArea = MIN_SINGLE_AREA) {
   // Lower-half median: take the median of the smallest 50% of blob areas.
   // Singles dominate the lower half of the area distribution; clumps inflate
   // the upper half. The previous log-histogram peak was systematically biased
@@ -497,16 +525,16 @@ function estimateSingleArea(areas, saFactor) {
   //
   // Benchmark (46 ground-truth photos): MAPE 11.4% → 9.8%; 46% → 65% within
   // 10% of truth; bias -11.6 → +1.3.
-  if (areas.length === 0) return MIN_SINGLE_AREA * saFactor;
+  if (areas.length === 0) return minSingleArea * saFactor;
   if (areas.length < 3) {
     const sorted = [...areas].sort((a, b) => a - b);
-    return Math.max(MIN_SINGLE_AREA, sorted[Math.floor(sorted.length / 2)]) * saFactor;
+    return Math.max(minSingleArea, sorted[Math.floor(sorted.length / 2)]) * saFactor;
   }
   const sorted = [...areas].sort((a, b) => a - b);
   const halfLen = Math.max(3, Math.floor(sorted.length / 2));
   const half = sorted.slice(0, halfLen);
   const median = half[Math.floor(half.length / 2)];
-  return Math.max(MIN_SINGLE_AREA, median) * saFactor;
+  return Math.max(minSingleArea, median) * saFactor;
 }
 
 // --- PWA: service worker + install prompt ---
@@ -711,10 +739,11 @@ async function submitFeedback(sharePhoto) {
 function findBestSaFactor(_img, userTarget) {
   if (!lastResult || !lastResult.blobs) return null;
   const blobs = lastResult.blobs;
+  const minSingleArea = lastResult.minSingleArea ?? MIN_SINGLE_AREA;
   let best = null;
   for (let i = 0; i <= 60; i++) {
     const f = 0.60 + i * 0.01;
-    const { total } = blobsToDetections(blobs, f);
+    const { total } = blobsToDetections(blobs, f, minSingleArea);
     const diff = Math.abs(total - userTarget);
     if (best === null || diff < best.diff) {
       best = { factor: Math.round(f * 100) / 100, predictedTotal: total, diff };
