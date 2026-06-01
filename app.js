@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_VERSION = '0.7.0-resolution-scaling';  // bump on releases
+const APP_VERSION = '0.7.1-tuned-defaults';  // bump on releases
 document.getElementById('appVersion').textContent = 'v' + APP_VERSION;
 
 // Threshold used for bin/tray detection (finding WHERE the bak is in the photo).
@@ -51,14 +51,17 @@ const DETECTION_MODES = {
     darkThreshold: 75,
     morphClose: true,
     minBlobArea: 80,
-    defaultSaFactor: 1.00,
+    // Empirical optimum across the combined 88-photo dataset (test-files +
+    // test-files2). See scripts/tune_sa_factor.py.
+    defaultSaFactor: 0.98,
   },
   sensitive: {
     label: 'Gevoelig',
     darkThreshold: 50,
     morphClose: false,
     minBlobArea: 30,
-    defaultSaFactor: 1.20,
+    // Empirical optimum across the combined 88-photo dataset.
+    defaultSaFactor: 1.21,
   },
 };
 const DEFAULT_DETECTION_MODE = 'sensitive';

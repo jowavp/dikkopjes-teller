@@ -73,13 +73,19 @@ DETECTION_MODES = {
         'darkThreshold': 75,
         'morphClose': True,
         'minBlobArea': 80,
-        'defaultSaFactor': 1.00,
+        # Empirical optimum across the combined 88-photo dataset (test-files +
+        # test-files2). See scripts/tune_sa_factor.py for the sweep that
+        # picked this value. Test-files alone prefers 1.01 (essentially
+        # identical), test-files2 alone prefers 0.95.
+        'defaultSaFactor': 0.98,
     },
     'sensitive': {
         'darkThreshold': 50,
         'morphClose': False,
         'minBlobArea': 30,
-        'defaultSaFactor': 1.20,
+        # Empirical optimum across the combined 88-photo dataset. Test-files
+        # alone prefers 1.21, test-files2 alone prefers 1.24.
+        'defaultSaFactor': 1.21,
     },
 }
 DEFAULT_DETECTION_MODE = 'sensitive'
