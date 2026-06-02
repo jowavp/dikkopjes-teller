@@ -81,13 +81,17 @@
   <div class="card hidden" id="resultCard">
     <div class="result">
       <h2 id="resultCount"></h2>
-      <canvas id="resultCanvas"></canvas>
+      <div class="canvas-wrap" id="canvasWrap">
+        <canvas id="resultCanvas"></canvas>
+        <div id="markerOverlay" class="marker-overlay" aria-label="Klik op een markering om aan te passen"></div>
+      </div>
       <div>
         <button class="download-btn" id="downloadBtn">⬇️ Download foto</button>
       </div>
       <div class="legend">
         <div><span class="dot red"></span>1 dikkop</div>
         <div><span class="dot orange"></span>kluit (xN)</div>
+        <div class="legend-hint">💡 Tik op een markering om het aantal aan te passen</div>
       </div>
 
       <!-- Feedback sectie -->

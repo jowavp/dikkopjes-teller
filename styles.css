@@ -109,11 +109,120 @@ button.primary:disabled { background: #aab8c4; cursor: not-allowed; }
   color: var(--accent);
   margin: 0.5rem 0 1rem;
 }
+.canvas-wrap {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+  line-height: 0;
+}
 .result canvas {
   max-width: 100%;
   height: auto;
   border-radius: 8px;
   border: 1px solid var(--border);
+  display: block;
+}
+.marker-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.marker-overlay .marker {
+  position: absolute;
+  pointer-events: auto;
+  transform: translate(-50%, -50%);
+  background: rgba(255, 255, 255, 0.92);
+  border-radius: 50%;
+  font-weight: 700;
+  cursor: pointer;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  font-family: inherit;
+  transition: transform 0.1s, background 0.1s;
+  touch-action: manipulation;
+}
+.marker-overlay .marker.single {
+  width: 16px; height: 16px;
+  border: 2px solid #e74c3c;
+  color: transparent;
+}
+.marker-overlay .marker.clump {
+  width: 30px; height: 30px;
+  border: 3px solid #f39c12;
+  color: #b35900;
+  font-size: 0.85rem;
+}
+.marker-overlay .marker:hover,
+.marker-overlay .marker:focus-visible {
+  background: white;
+  transform: translate(-50%, -50%) scale(1.2);
+  z-index: 10;
+  outline: none;
+}
+.marker-overlay .marker.editing {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+  transform: translate(-50%, -50%) scale(1.25);
+  z-index: 20;
+}
+.marker-editor {
+  position: absolute;
+  pointer-events: auto;
+  transform: translate(-50%, -100%);
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 6px 18px rgba(0,0,0,0.18);
+  padding: 0.4rem;
+  display: flex;
+  gap: 0.25rem;
+  align-items: center;
+  z-index: 30;
+  margin-top: -10px;
+  white-space: nowrap;
+}
+.marker-editor button {
+  min-width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: white;
+  font-size: 1.1rem;
+  font-weight: 700;
+  cursor: pointer;
+  padding: 0 0.5rem;
+  font-family: inherit;
+}
+.marker-editor button:hover {
+  background: #f5f7f9;
+  border-color: #c9d3dc;
+}
+.marker-editor .count {
+  min-width: 28px;
+  text-align: center;
+  font-weight: 700;
+  font-size: 1.05rem;
+  padding: 0 0.4rem;
+  color: var(--accent-dark);
+}
+.marker-editor .delete {
+  color: var(--error);
+  border-color: #f0c4c0;
+  margin-left: 0.25rem;
+}
+.marker-editor .delete:hover {
+  background: #fbeae8;
+}
+.legend-hint {
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-style: italic;
+  flex-basis: 100%;
+  text-align: center;
 }
 .result .download-btn {
   display: inline-block;

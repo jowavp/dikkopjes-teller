@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_VERSION = '0.9.1-binmask-coverage';  // bump on releases
+const APP_VERSION = '0.10.0-tap-correct';  // bump on releases
 document.getElementById('appVersion').textContent = 'v' + APP_VERSION;
 
 // Threshold used for bin/tray detection (finding WHERE the bak is in the photo).
@@ -144,6 +144,7 @@ const detectionModeSelect = $('detectionMode');
 const resultCard = $('resultCard');
 const resultCount = $('resultCount');
 const resultCanvas = $('resultCanvas');
+const markerOverlay = $('markerOverlay');
 const downloadBtn = $('downloadBtn');
 
 function onOpenCvReady() {
@@ -286,19 +287,25 @@ async function processImage() {
     const { detections, total } = blobsToDetections(blobs, saFactor, minSingleArea);
     // Bereken samenvattende stats voor analytics
     const stats = computeBlobStats(blobs, detections, saFactor, minSingleArea);
-    // Render with annotations
-    const canvas = renderResult(srcRgb, detections, total);
+    // Render the base image only — markers go in an HTML overlay so the
+    // user can tap to correct them.
+    const canvas = renderResult(srcRgb);
     const dest = resultCanvas;
     dest.width = canvas.width;
     dest.height = canvas.height;
     dest.getContext('2d').drawImage(canvas, 0, 0);
     resultCount.textContent = `🐸 ${total} dikkopjes geteld`;
-    // Bewaar laatste resultaat (incl. blobs voor snelle hercalibratie + stats voor analytics)
     lastResult = {
-      total, saFactor, image: currentImage, blobs, stats, minSingleArea,
+      // `total` reflects user corrections (tap-edits); `appCount` is the
+      // immutable original prediction, used so analytics still know what
+      // the algorithm itself said even after the user corrected.
+      total, appCount: total,
+      saFactor, image: currentImage, blobs, detections, stats, minSingleArea,
       imageWidth: currentImage.naturalWidth,
       imageHeight: currentImage.naturalHeight,
+      userEdited: false,
     };
+    renderMarkers();
     resultCard.classList.remove('hidden');
     statusCard.classList.add('hidden');
     resultCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
@@ -311,7 +318,14 @@ async function processImage() {
 }
 
 downloadBtn.addEventListener('click', () => {
-  resultCanvas.toBlob(blob => {
+  if (!lastResult) return;
+  // Re-bake markers into the image so the downloaded file reflects any
+  // user corrections (the on-screen canvas only has the base photo;
+  // markers live in the HTML overlay).
+  const baked = bakeMarkersToCanvas(
+    lastResult.image, lastResult.detections, lastResult.total,
+  );
+  baked.toBlob(blob => {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -451,44 +465,177 @@ function computeBlobStats(blobs, detections, saFactor, minSingleArea = MIN_SINGL
 }
 
 /**
- * Tekent de annotaties op de bron-Mat en geeft een canvas terug.
- * Consumeert (deletes) srcRgb.
+ * Render the base image to a canvas — no markers, no banner. Markers are
+ * drawn as HTML buttons in an overlay div so the user can tap to correct
+ * counts. Download flow re-renders with markers baked in via bakeMarkers().
+ *
+ * Consumes (deletes) srcRgb.
  */
-function renderResult(srcRgb, detections, total) {
-  const out = srcRgb;
-  const RED = new cv.Scalar(255, 0, 0);
-  const ORANGE = new cv.Scalar(255, 140, 0);
+function renderResult(srcRgb) {
+  const outRgba = new cv.Mat();
+  cv.cvtColor(srcRgb, outRgba, cv.COLOR_RGB2RGBA);
+  const resultCv = document.createElement('canvas');
+  cv.imshow(resultCv, outRgba);
+  srcRgb.delete(); outRgba.delete();
+  return resultCv;
+}
+
+/**
+ * Bake current detections + banner onto a copy of the original photo, for
+ * downloading. Matches the visual style of the HTML markers as closely as
+ * possible so the downloaded image is recognisable as the same view.
+ */
+function bakeMarkersToCanvas(image, detections, total) {
+  const src = document.createElement('canvas');
+  src.width = image.naturalWidth;
+  src.height = image.naturalHeight;
+  src.getContext('2d').drawImage(image, 0, 0);
+
+  const srcMat = cv.imread(src);  // RGBA
+  const rgb = new cv.Mat();
+  cv.cvtColor(srcMat, rgb, cv.COLOR_RGBA2RGB);
+
+  const RED = new cv.Scalar(231, 76, 60);
+  const ORANGE = new cv.Scalar(243, 156, 18);
+  // Scale circle/text sizes with image dimension so they're visible on
+  // both small (≈1 MP) and large (≈6 MP) photos.
+  const scale = Math.max(1, image.naturalWidth / 1500);
+  const singleR = Math.round(7 * scale);
+  const clumpR = Math.round(11 * scale);
+  const lineThin = Math.max(2, Math.round(2 * scale));
+  const lineThick = Math.max(3, Math.round(3 * scale));
+  const fontScale = 0.7 * scale;
+  const fontThick = Math.max(2, Math.round(2 * scale));
+
   for (const d of detections) {
     if (d.count === 1) {
-      cv.circle(out, new cv.Point(d.cx, d.cy), 7, RED, 2, cv.LINE_AA);
+      cv.circle(rgb, new cv.Point(d.cx, d.cy), singleR, RED, lineThin, cv.LINE_AA);
     } else {
-      cv.circle(out, new cv.Point(d.cx, d.cy), 11, ORANGE, 3, cv.LINE_AA);
-      cv.putText(out, 'x' + d.count, new cv.Point(d.cx + 13, d.cy + 6),
-                 cv.FONT_HERSHEY_SIMPLEX, 0.7, ORANGE, 2, cv.LINE_AA);
+      cv.circle(rgb, new cv.Point(d.cx, d.cy), clumpR, ORANGE, lineThick, cv.LINE_AA);
+      cv.putText(rgb, 'x' + d.count,
+                 new cv.Point(d.cx + Math.round(13 * scale), d.cy + Math.round(6 * scale)),
+                 cv.FONT_HERSHEY_SIMPLEX, fontScale, ORANGE, fontThick, cv.LINE_AA);
     }
   }
 
-  const banner = `Aantal dikkopjes: ${total}`;
-  cv.rectangle(out, new cv.Point(10, 10), new cv.Point(760, 90),
+  const bannerW = Math.round(750 * scale);
+  const bannerH = Math.round(80 * scale);
+  cv.rectangle(rgb, new cv.Point(10, 10), new cv.Point(bannerW, bannerH),
                new cv.Scalar(255, 255, 255), -1);
-  cv.rectangle(out, new cv.Point(10, 10), new cv.Point(760, 90),
-               new cv.Scalar(0, 0, 0), 2);
-  cv.putText(out, banner, new cv.Point(25, 65),
-             cv.FONT_HERSHEY_SIMPLEX, 1.8, new cv.Scalar(0, 0, 0), 4, cv.LINE_AA);
+  cv.rectangle(rgb, new cv.Point(10, 10), new cv.Point(bannerW, bannerH),
+               new cv.Scalar(0, 0, 0), Math.max(2, Math.round(2 * scale)));
+  cv.putText(rgb, `Aantal dikkopjes: ${total}`,
+             new cv.Point(25, Math.round(60 * scale)),
+             cv.FONT_HERSHEY_SIMPLEX, 1.8 * scale, new cv.Scalar(0, 0, 0),
+             Math.max(3, Math.round(4 * scale)), cv.LINE_AA);
 
-  const outRgba = new cv.Mat();
-  cv.cvtColor(out, outRgba, cv.COLOR_RGB2RGBA);
-  const resultCv = document.createElement('canvas');
-  cv.imshow(resultCv, outRgba);
+  const rgba = new cv.Mat();
+  cv.cvtColor(rgb, rgba, cv.COLOR_RGB2RGBA);
+  const out = document.createElement('canvas');
+  cv.imshow(out, rgba);
+  srcMat.delete(); rgb.delete(); rgba.delete();
+  return out;
+}
 
-  out.delete(); outRgba.delete();
-  return resultCv;
+// --- Interactive HTML markers ---
+
+function renderMarkers() {
+  if (!lastResult || !lastResult.detections) return;
+  closeMarkerEditor();
+  markerOverlay.innerHTML = '';
+  const naturalW = lastResult.imageWidth;
+  const naturalH = lastResult.imageHeight;
+  // Map natural-image coords to displayed canvas px via percentages, so the
+  // overlay stays in sync regardless of CSS resizing.
+  for (let i = 0; i < lastResult.detections.length; i++) {
+    const d = lastResult.detections[i];
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'marker ' + (d.count === 1 ? 'single' : 'clump');
+    btn.textContent = d.count > 1 ? 'x' + d.count : '';
+    btn.style.left = (d.cx / naturalW * 100) + '%';
+    btn.style.top = (d.cy / naturalH * 100) + '%';
+    btn.dataset.idx = String(i);
+    btn.addEventListener('click', openMarkerEditor);
+    markerOverlay.appendChild(btn);
+  }
+}
+
+function openMarkerEditor(ev) {
+  ev.stopPropagation();
+  const btn = ev.currentTarget;
+  const idx = parseInt(btn.dataset.idx, 10);
+  if (!Number.isFinite(idx)) return;
+  closeMarkerEditor();
+  btn.classList.add('editing');
+
+  const editor = document.createElement('div');
+  editor.className = 'marker-editor';
+  editor.id = 'markerEditor';
+  editor.style.left = btn.style.left;
+  editor.style.top = btn.style.top;
+  editor.innerHTML = `
+    <button type="button" class="dec" aria-label="Min één">−</button>
+    <span class="count">${lastResult.detections[idx].count}</span>
+    <button type="button" class="inc" aria-label="Plus één">+</button>
+    <button type="button" class="delete" aria-label="Verwijderen">×</button>
+  `;
+  editor.addEventListener('click', e => e.stopPropagation());
+  editor.querySelector('.dec').addEventListener('click', () => bumpDetection(idx, -1));
+  editor.querySelector('.inc').addEventListener('click', () => bumpDetection(idx, +1));
+  editor.querySelector('.delete').addEventListener('click', () => deleteDetection(idx));
+  markerOverlay.appendChild(editor);
+
+  // Close on next outside click. Use a microtask delay so the click that
+  // opened the editor doesn't immediately close it.
+  setTimeout(() => document.addEventListener('click', closeOnOutsideClick), 0);
+}
+
+function closeMarkerEditor() {
+  const editor = document.getElementById('markerEditor');
+  if (editor) editor.remove();
+  for (const m of markerOverlay.querySelectorAll('.marker.editing')) {
+    m.classList.remove('editing');
+  }
+  document.removeEventListener('click', closeOnOutsideClick);
+}
+
+function closeOnOutsideClick(e) {
+  if (!e.target.closest('#markerEditor') && !e.target.closest('.marker-overlay .marker')) {
+    closeMarkerEditor();
+  }
+}
+
+function bumpDetection(idx, delta) {
+  const d = lastResult.detections[idx];
+  const newCount = Math.max(1, d.count + delta);
+  if (newCount === d.count) return;
+  d.count = newCount;
+  d.userEdited = true;
+  recomputeTotalAndRender();
+  // Re-open the editor on the (possibly re-styled) marker.
+  const btn = markerOverlay.querySelector(`.marker[data-idx="${idx}"]`);
+  if (btn) openMarkerEditor({ currentTarget: btn, stopPropagation: () => {} });
+}
+
+function deleteDetection(idx) {
+  lastResult.detections.splice(idx, 1);
+  recomputeTotalAndRender();
+}
+
+function recomputeTotalAndRender() {
+  lastResult.total = lastResult.detections.reduce((s, d) => s + d.count, 0);
+  lastResult.userEdited = true;
+  resultCount.textContent = `🐸 ${lastResult.total} dikkopjes geteld`;
+  renderMarkers();
 }
 
 function countTadpoles(img, saFactor) {
   const { blobs, srcRgb, minSingleArea } = detectBlobs(img);
   const { detections, total } = blobsToDetections(blobs, saFactor, minSingleArea);
-  const canvas = renderResult(srcRgb, detections, total);
+  // Tests call this and expect a baked-in canvas; reuse the download path.
+  srcRgb.delete();
+  const canvas = bakeMarkersToCanvas(img, detections, total);
   return { canvas, total };
 }
 
@@ -773,14 +920,16 @@ $('feedbackYesBtn')?.addEventListener('click', async () => {
   feedbackPrompt.classList.add('hidden');
   feedbackThanks.classList.remove('hidden');
   feedbackThanksDetail.textContent = '';
-  // Async, niet wachten. Bij bevestiging IS saFactor effectief de beste factor.
+  // appCount = original prediction (immutable); userCount = whatever's on
+  // screen now (corrected via tap-edits if applicable). When the user
+  // edits then confirms, the note tells analytics this was a correction.
   sendFeedback({
-    appCount: lastResult.total,
-    userCount: lastResult.total,  // bevestigd
+    appCount: lastResult.appCount,
+    userCount: lastResult.total,
     saFactor: lastResult.saFactor,
-    bestSaFactor: lastResult.saFactor,  // huidige factor was correct
+    bestSaFactor: lastResult.saFactor,
     sharePhoto: false,
-    notes: 'confirmed_correct',
+    notes: lastResult.userEdited ? 'confirmed_after_correction' : 'confirmed_correct',
   }).catch(err => console.warn('Feedback verzenden mislukt:', err));
 });
 
@@ -849,12 +998,13 @@ async function submitFeedback(sharePhoto) {
     // findBestSaFactor is synchroon en bijna gratis (gebruikt gecachte blobs)
     const best = findBestSaFactor(lastResult.image, userN);
     await sendFeedback({
-      appCount: lastResult.total,
+      appCount: lastResult.appCount,
       userCount: userN,
       saFactor: lastResult.saFactor,
       bestSaFactor: best?.factor,
       sharePhoto: sharePhoto,
       image: sharePhoto ? lastResult.image : null,
+      notes: lastResult.userEdited ? 'tap_corrected' : null,
     });
     feedbackForm.classList.add('hidden');
     feedbackThanks.classList.remove('hidden');
