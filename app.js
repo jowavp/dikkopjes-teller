@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_VERSION = '0.10.1-transparent-markers';  // bump on releases
+const APP_VERSION = '0.11.0-add-edits-feedback';  // bump on releases
 document.getElementById('appVersion').textContent = 'v' + APP_VERSION;
 
 // Threshold used for bin/tray detection (finding WHERE the bak is in the photo).
@@ -304,6 +304,9 @@ async function processImage() {
       imageWidth: currentImage.naturalWidth,
       imageHeight: currentImage.naturalHeight,
       userEdited: false,
+      // Append-only log of every user correction; used to build a per-blob
+      // training signal in the feedback payload.
+      edits: [],
     };
     renderMarkers();
     resultCard.classList.remove('hidden');
@@ -610,8 +613,12 @@ function bumpDetection(idx, delta) {
   const d = lastResult.detections[idx];
   const newCount = Math.max(1, d.count + delta);
   if (newCount === d.count) return;
+  const fromCount = d.count;
   d.count = newCount;
   d.userEdited = true;
+  lastResult.edits.push({
+    type: 'count', cx: d.cx, cy: d.cy, from: fromCount, to: newCount,
+  });
   recomputeTotalAndRender();
   // Re-open the editor on the (possibly re-styled) marker.
   const btn = markerOverlay.querySelector(`.marker[data-idx="${idx}"]`);
@@ -619,15 +626,69 @@ function bumpDetection(idx, delta) {
 }
 
 function deleteDetection(idx) {
+  const d = lastResult.detections[idx];
+  lastResult.edits.push({
+    type: 'delete', cx: d.cx, cy: d.cy, count: d.count,
+    userAdded: !!d.userAdded,
+  });
   lastResult.detections.splice(idx, 1);
   recomputeTotalAndRender();
 }
+
+function addDetectionAt(cx, cy) {
+  const newDetection = {
+    cx: Math.round(cx),
+    cy: Math.round(cy),
+    count: 1,
+    area: 0,
+    userAdded: true,
+  };
+  lastResult.detections.push(newDetection);
+  lastResult.edits.push({ type: 'add', cx: newDetection.cx, cy: newDetection.cy });
+  recomputeTotalAndRender();
+  // Show the editor on the just-added marker so the user can immediately
+  // bump to 2/3 or × to undo an accidental tap.
+  const idx = lastResult.detections.length - 1;
+  const btn = markerOverlay.querySelector(`.marker[data-idx="${idx}"]`);
+  if (btn) openMarkerEditor({ currentTarget: btn, stopPropagation: () => {} });
+}
+
+// Empty-overlay tap → add a new marker. Marker buttons stopPropagation
+// in their click handlers, so this only fires on truly-empty taps.
+markerOverlay.addEventListener('click', ev => {
+  if (!lastResult) return;
+  // If an editor is open, treat empty tap as "just close it" — the document
+  // listener already does that; we just skip the add to avoid surprise.
+  if (document.getElementById('markerEditor')) return;
+  if (ev.target !== markerOverlay) return;  // click on a child (marker) bubbled
+  const rect = markerOverlay.getBoundingClientRect();
+  const xFrac = (ev.clientX - rect.left) / rect.width;
+  const yFrac = (ev.clientY - rect.top) / rect.height;
+  if (xFrac < 0 || xFrac > 1 || yFrac < 0 || yFrac > 1) return;
+  addDetectionAt(xFrac * lastResult.imageWidth, yFrac * lastResult.imageHeight);
+});
 
 function recomputeTotalAndRender() {
   lastResult.total = lastResult.detections.reduce((s, d) => s + d.count, 0);
   lastResult.userEdited = true;
   resultCount.textContent = `🐸 ${lastResult.total} dikkopjes geteld`;
   renderMarkers();
+}
+
+/**
+ * Build the `notes` payload for feedback. When the user has made tap-edits,
+ * we serialize them so the backend can use per-blob corrections as training
+ * signal — much richer than the bare total count. Format:
+ *   - no edits:  the plain reason tag (back-compat)
+ *   - edits:     JSON {"r": <reason>, "edits": [{type, cx, cy, ...}]}
+ *               Each edit is a `count` (change), `delete`, or `add` event,
+ *               with image-pixel coords so the row can be joined back to the
+ *               shared photo for retraining.
+ */
+function buildFeedbackNotes(reasonTag) {
+  const edits = lastResult?.edits ?? [];
+  if (edits.length === 0) return reasonTag || null;
+  return JSON.stringify({ r: reasonTag, edits });
 }
 
 function countTadpoles(img, saFactor) {
@@ -929,7 +990,9 @@ $('feedbackYesBtn')?.addEventListener('click', async () => {
     saFactor: lastResult.saFactor,
     bestSaFactor: lastResult.saFactor,
     sharePhoto: false,
-    notes: lastResult.userEdited ? 'confirmed_after_correction' : 'confirmed_correct',
+    notes: buildFeedbackNotes(
+      lastResult.userEdited ? 'confirmed_after_correction' : 'confirmed_correct',
+    ),
   }).catch(err => console.warn('Feedback verzenden mislukt:', err));
 });
 
@@ -1004,7 +1067,7 @@ async function submitFeedback(sharePhoto) {
       bestSaFactor: best?.factor,
       sharePhoto: sharePhoto,
       image: sharePhoto ? lastResult.image : null,
-      notes: lastResult.userEdited ? 'tap_corrected' : null,
+      notes: buildFeedbackNotes(lastResult.userEdited ? 'tap_corrected' : null),
     });
     feedbackForm.classList.add('hidden');
     feedbackThanks.classList.remove('hidden');

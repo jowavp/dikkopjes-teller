@@ -125,7 +125,10 @@ button.primary:disabled { background: #aab8c4; cursor: not-allowed; }
 .marker-overlay {
   position: absolute;
   inset: 0;
-  pointer-events: none;
+  /* Overlay catches taps on empty area (= add marker for missed tadpole).
+     Markers themselves stopPropagation, so they handle their own clicks. */
+  pointer-events: auto;
+  cursor: crosshair;
 }
 .marker-overlay .marker {
   position: absolute;
@@ -154,11 +157,6 @@ button.primary:disabled { background: #aab8c4; cursor: not-allowed; }
   border: 2px solid #f39c12;
   color: #f39c12;
   font-size: 0.85rem;
-  /* White halo so the count stays readable over dark tadpoles or light water */
-  text-shadow:
-    -1px -1px 2px white, 1px -1px 2px white,
-    -1px  1px 2px white, 1px  1px 2px white,
-     0    0   3px white;
 }
 .marker-overlay .marker:hover,
 .marker-overlay .marker:focus-visible {
