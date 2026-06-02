@@ -90,22 +90,29 @@ def best_factor_for(blobs, target, params):
     return best
 
 
-def load_dataset(csv_path, image_dir, detection_mode):
+def load_dataset(csv_path, image_dir, detection_mode, rectify=False):
     """Detect blobs once per photo; return cache list of dicts."""
     cache = []
     with open(csv_path, 'r', newline='') as f:
         rows = [r for r in csv.DictReader(f) if r.get('image_path')]
     base_params = {'detection_mode': detection_mode}
+    if rectify:
+        from perspective_rectify import rectify_to_box
     for r in rows:
         path = image_dir / r['image_path']
         img = cv2.imread(str(path))
         if img is None:
             continue
-        scaled = scale_params_for_image(base_params, img)
-        blobs, _ = detect_blobs(img, scaled)
+        used_img = img
+        if rectify:
+            warped, _ = rectify_to_box(img, mode=detection_mode)
+            if warped is not None:
+                used_img = warped
+        scaled = scale_params_for_image(base_params, used_img)
+        blobs, _ = detect_blobs(used_img, scaled)
         if not blobs:
             continue
-        feats = features_from_blobs(blobs, img.shape)
+        feats = features_from_blobs(blobs, used_img.shape)
         truth = int(r['user_count'])
         bf, _, _ = best_factor_for(blobs, truth, scaled)
         cache.append({
@@ -153,14 +160,14 @@ def evaluate_factor_strategy(cache, factor_fn):
     return metrics(errs_abs, errs_rel)
 
 
-def analyze_mode(mode, emit_coefs=False):
+def analyze_mode(mode, emit_coefs=False, rectify=False):
     print(f'\n{"#" * 60}')
-    print(f'### MODE: {mode}')
+    print(f'### MODE: {mode}  rectify={rectify}')
     print(f'{"#" * 60}')
     default = DETECTION_MODES[mode]['defaultSaFactor']
 
-    cache_old = load_dataset(TEST_FILES / 'feedback_rows.csv', TEST_FILES, mode)
-    cache_new = load_dataset(TEST_FILES2 / 'ground_truth.csv', TEST_FILES2, mode)
+    cache_old = load_dataset(TEST_FILES / 'feedback_rows.csv', TEST_FILES, mode, rectify)
+    cache_new = load_dataset(TEST_FILES2 / 'ground_truth.csv', TEST_FILES2, mode, rectify)
     cache = cache_old + cache_new
     n = len(cache)
     print(f'\nLoaded {len(cache_old)} test-files + {len(cache_new)} test-files2 = {n} photos')
@@ -287,10 +294,12 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--detection', choices=list(DETECTION_MODES.keys()))
     parser.add_argument('--emit-coefs', action='store_true')
+    parser.add_argument('--rectify', action='store_true',
+                        help='Perspective-rectify each image before detection')
     args = parser.parse_args()
     modes = [args.detection] if args.detection else list(DETECTION_MODES.keys())
     for m in modes:
-        analyze_mode(m, emit_coefs=args.emit_coefs)
+        analyze_mode(m, emit_coefs=args.emit_coefs, rectify=args.rectify)
 
 
 if __name__ == '__main__':
