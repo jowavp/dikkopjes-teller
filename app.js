@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_VERSION = '0.10.0-tap-correct';  // bump on releases
+const APP_VERSION = '0.10.1-transparent-markers';  // bump on releases
 document.getElementById('appVersion').textContent = 'v' + APP_VERSION;
 
 // Threshold used for bin/tray detection (finding WHERE the bak is in the photo).
