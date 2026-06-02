@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_VERSION = '0.9.0-joint-tune';  // bump on releases
+const APP_VERSION = '0.9.1-binmask-coverage';  // bump on releases
 document.getElementById('appVersion').textContent = 'v' + APP_VERSION;
 
 // Threshold used for bin/tray detection (finding WHERE the bak is in the photo).
@@ -497,6 +497,9 @@ function findBinMask(blurred, linearScale = 1.0) {
   const kDilate = Math.max(3, Math.round(20 * linearScale));
   const kBright = Math.max(3, Math.round(25 * linearScale));
   const kFinal = Math.max(3, Math.round(30 * linearScale));
+  // Bin-mask "dense region" filter (see comment in scripts/benchmark.py).
+  const densityKeepRatio = 0.05;
+  const densityKeepMinPx = Math.max(500, Math.round(2000 * (linearScale * linearScale)));
 
   // 1. Dark pixels — uses BIN_DARK_THRESHOLD (independent of tadpole detection mode)
   const dark = new cv.Mat();
@@ -508,9 +511,9 @@ function findBinMask(blurred, linearScale = 1.0) {
   const dense = new cv.Mat();
   cv.threshold(density, dense, DENSITY_THRESHOLD, 255, cv.THRESH_BINARY);
 
-  // 3. Take ALL dense components >= 20% of the largest. Critical for bins
-  // where tadpoles cluster in disconnected areas (e.g. left vs right side):
-  // taking only the largest component would crop out half the bin.
+  // 3. Keep dense components down to either densityKeepRatio of the largest
+  // OR an absolute pixel floor — whichever is smaller — so small isolated
+  // tadpole clusters in a box corner still get included.
   const labels = new cv.Mat();
   const stats = new cv.Mat();
   const centroids = new cv.Mat();
@@ -520,7 +523,8 @@ function findBinMask(blurred, linearScale = 1.0) {
     const a = stats.intAt(i, cv.CC_STAT_AREA);
     if (a > largestArea) largestArea = a;
   }
-  const keepThreshold = Math.max(1, Math.floor(largestArea * 0.20));
+  const keepThreshold = Math.max(1,
+    Math.min(Math.floor(largestArea * densityKeepRatio), densityKeepMinPx));
   const keep = new Uint8Array(num);
   for (let i = 1; i < num; i++) {
     if (stats.intAt(i, cv.CC_STAT_AREA) >= keepThreshold) keep[i] = 1;

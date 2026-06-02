@@ -154,6 +154,14 @@ def scale_params_for_image(base_params, img):
     p.setdefault('bin_dilate_kernel', max(3, int(round(20 * linear_scale))))
     p.setdefault('bin_bright_close_kernel', max(3, int(round(25 * linear_scale))))
     p.setdefault('bin_final_close_kernel', max(3, int(round(30 * linear_scale))))
+    # Bin-mask "dense region" filter. Was 0.20: any density-region smaller
+    # than 20% of the largest was dropped. That cuts off small isolated
+    # tadpole clusters in box corners (see test-files3 23_100 — 2 tadpoles
+    # lost in the bottom-left). Lowered to 0.05 with an absolute pixel
+    # floor as a safety against picking up noise. Costs ~0.5pp MAPE on
+    # average but markedly improves visual detection coverage.
+    p.setdefault('density_keep_ratio', 0.05)
+    p.setdefault('density_keep_min_pixels', max(500, int(round(2000 * area_scale))))
 
     # Per-mode counting hyperparameters (overridable). These don't depend on
     # resolution; they live with scale_params_for_image purely so the per-image
@@ -218,12 +226,14 @@ def find_bin_mask(blurred, params=None):
     num, labels, stats, _ = cv2.connectedComponentsWithStats(dense, connectivity=8)
     if num <= 1:
         return np.full(blurred.shape, 255, dtype=np.uint8)
-    # Take all dense components >= 20% of the largest. This is critical for bins
-    # where tadpoles cluster in disconnected areas (e.g. left vs right side):
-    # taking only the largest component would crop out half the bin.
+    # Keep dense components down to either `density_keep_ratio` of the largest
+    # OR an absolute pixel floor — whichever is smaller — so 2-3 isolated
+    # tadpoles in a box corner survive instead of being cropped out.
+    keep_ratio = float(p.get('density_keep_ratio', 0.05))
+    keep_min_px = int(p.get('density_keep_min_pixels', 2000))
     areas = stats[1:, cv2.CC_STAT_AREA]
     largest_area = int(areas.max())
-    keep_threshold = max(1, int(largest_area * 0.20))
+    keep_threshold = max(1, min(int(largest_area * keep_ratio), keep_min_px))
     keep_labels = [i + 1 for i, a in enumerate(areas) if a >= keep_threshold]
     region = np.isin(labels, keep_labels).astype(np.uint8) * 255
 
